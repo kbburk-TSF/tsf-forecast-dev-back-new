@@ -10,16 +10,13 @@ from datetime import datetime
 router = APIRouter(prefix="/forms", tags=["forms"])
 templates = Jinja2Templates(directory="backend/templates")
 
-# Use unqualified table name; rely on search_path
 DB_TABLE = "air_quality_raw"
 
-# Optional separate engine for staging_historical inserts (engine.air_quality_engine_research)
 ENGINE_DATABASE_URL = os.getenv("ENGINE_DATABASE_URL", "").strip()
 ENGINE_STAGING_TABLE = os.getenv("ENGINE_STAGING_TABLE", "engine.staging_historical")
 engine2 = create_engine(ENGINE_DATABASE_URL) if ENGINE_DATABASE_URL else None
 
 def _set_search_path(conn):
-    # Ensure the app resolves tables in your canonical schema first
     conn.execute(text("SET search_path TO air_quality_demo_data, public"))
 
 def _list_params():
@@ -71,15 +68,18 @@ def _write_csv(df: pd.DataFrame, folder: str, filename: str) -> str:
     df.to_csv(fpath, index=False)
     return fpath
 
-def _require_base_url() -> str:
+def _get_base_url(request: Request) -> str:
     base = os.getenv("BACKEND_BASE_URL", "").strip().rstrip("/")
-    if not base:
-        raise HTTPException(status_code=500, detail="BACKEND_BASE_URL env var is required for classical chaining.")
-    return base
+    if base:
+        return base
+    # derive from the incoming request (scheme + netloc), e.g., https://tsf-forecast-dev-backend.onrender.com
+    url = str(request.base_url).rstrip("/")
+    if not url:
+        raise HTTPException(status_code=500, detail="Unable to derive backend base URL.")
+    return url
 
-def _call_classical_start(parameter: str, state: str) -> str:
-    base = _require_base_url()
-    url = f"{base}/classical/start"
+def _call_classical_start(base_url: str, parameter: str, state: str) -> str:
+    url = f"{base_url}/classical/start"
     payload = {
         "target_value": parameter,
         "state_name": state,
@@ -94,9 +94,8 @@ def _call_classical_start(parameter: str, state: str) -> str:
         raise HTTPException(status_code=500, detail="No job_id returned from classical/start")
     return job_id
 
-def _wait_for_job(job_id: str, timeout_sec: int = 240) -> dict:
-    base = _require_base_url()
-    url = f"{base}/classical/status"
+def _wait_for_job(base_url: str, job_id: str, timeout_sec: int = 240) -> dict:
+    url = f"{base_url}/classical/status"
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
         rr = requests.get(url, params={"job_id": job_id}, timeout=10)
@@ -109,9 +108,8 @@ def _wait_for_job(job_id: str, timeout_sec: int = 240) -> dict:
         time.sleep(1.0)
     raise HTTPException(status_code=504, detail="Timeout waiting for classical job")
 
-def _download_job_csv(job_id: str) -> pd.DataFrame:
-    base = _require_base_url()
-    url = f"{base}/classical/download"
+def _download_job_csv(base_url: str, job_id: str) -> pd.DataFrame:
+    url = f"{base_url}/classical/download"
     rr = requests.get(url, params={"job_id": job_id}, timeout=30)
     rr.raise_for_status()
     return pd.read_csv(io.StringIO(rr.text))
@@ -140,7 +138,6 @@ def _insert_to_staging(df: pd.DataFrame, parameter: str, state: str, forecast_id
                         "forecast_id": r["forecast_id"],
                     })
         except Exception:
-            # best-effort; don't block download
             pass
 
 @router.get("/classical", response_class=HTMLResponse)
@@ -150,8 +147,7 @@ def classical_form(request: Request):
     return templates.TemplateResponse("forms/classical.html", {"request": request, "params": params, "states": states})
 
 @router.post("/classical/run")
-def classical_run(parameter: str = Form(...), state: str = Form(...)):
-    # 1) RAW aggregation
+def classical_run(request: Request, parameter: str = Form(...), state: str = Form(...)):
     df_raw = _daily_mean_df(parameter, state)
     today = datetime.utcnow().strftime("%Y%m%d")
     safe_param = _safe_name(parameter)
@@ -160,16 +156,14 @@ def classical_run(parameter: str = Form(...), state: str = Form(...)):
     raw_name = f"{safe_param}_{safe_state}_{today}_raw.csv"
     _write_csv(df_raw, jobs_dir, raw_name)
 
-    # 2) Run classical, wait, download
-    job_id = _call_classical_start(parameter, state)
-    _ = _wait_for_job(job_id, timeout_sec=240)
-    df_final = _download_job_csv(job_id)
+    base = _get_base_url(request)
+    job_id = _call_classical_start(base, parameter, state)
+    _ = _wait_for_job(base, job_id, timeout_sec=240)
+    df_final = _download_job_csv(base, job_id)
     df_final.insert(0, "forecast_id", job_id)
 
-    # 3) Save final CSV and insert to staging
     final_name = f"{safe_param}_{safe_state}_{today}.csv"
     final_path = _write_csv(df_final, jobs_dir, final_name)
     _insert_to_staging(df_final, parameter, state, job_id)
 
-    # 4) Return final file
     return FileResponse(final_path, media_type="text/csv", filename=final_name)
