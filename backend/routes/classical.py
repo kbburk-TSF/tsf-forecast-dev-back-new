@@ -10,7 +10,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 import os
-# --- Neon/libpq env fixes (do not touch forecast logic) ---
+# --- Neon/libpq env fixes (no forecast logic changes) ---
 for _k in ["DATABASE_URL", "NEON_DATABASE_URL", "PGCHANNELBINDING"]:
     if _k in os.environ and isinstance(os.environ[_k], str):
         os.environ[_k] = os.environ[_k].strip()
@@ -70,7 +70,7 @@ def _monthly_quarterly(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
     return m, q
 
 # ---------- DB Helpers ----------
-def _get_conn():
+def _get_conn_raw():
     import re
     dsn = os.getenv("DATABASE_URL")
     if dsn:
@@ -78,10 +78,7 @@ def _get_conn():
         dsn = re.sub(r"^(postgresql?|postgres)\+psycopg2?://", r"\1://", dsn, flags=re.I)
         if "sslmode=" not in dsn:
             dsn += ("&" if "?" in dsn else "?") + "sslmode=require"
-        __conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor)
-        with __conn.cursor() as __cur:
-            __cur.execute("SET search_path TO air_quality_demo_data, public")
-        return __conn
+        return psycopg2.connect(dsn, cursor_factory=RealDictCursor)
     host = os.getenv("NEON_HOST")
     db   = os.getenv("NEON_DB")
     user = os.getenv("NEON_USER")
@@ -89,17 +86,27 @@ def _get_conn():
     port = os.getenv("NEON_PORT", "5432")
     if not all([host, db, user, pwd]):
         raise HTTPException(status_code=500, detail="Neon connection env vars not set (DATABASE_URL or NEON_*).")
-    __conn = psycopg2.connect(
+    return psycopg2.connect(
         host=host, dbname=db, user=user, password=pwd, port=port,
         cursor_factory=RealDictCursor, sslmode="require"
     )
-        with __conn.cursor() as __cur:
-            __cur.execute("SET search_path TO air_quality_demo_data, public")
-        return __conn
 
 DEFAULT_TABLE = os.getenv("TSF_TABLE", 'demo_air_quality.air_quality_raw')
 
 # ---------- Load series from Neon ----------
+
+def _get_conn():
+    """Wrapper around original _get_conn_raw that sets the search_path for Neon.
+    No changes to any forecast logic.
+    """
+    conn = _get_conn_raw()
+    try:
+        with conn.cursor() as _c:
+            _c.execute("SET search_path TO air_quality_demo_data, public")
+    except Exception:
+        pass
+    return conn
+
 def _load_series_from_neon(
     db: str,
     target_value: str,
