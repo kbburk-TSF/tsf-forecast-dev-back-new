@@ -26,7 +26,8 @@ def _redis() -> Redis:
     return Redis.from_url(url)
 
 def _queue() -> Queue:
-    return Queue(os.getenv("TSF_RQ_QUEUE", "tsf"), connection=_redis())
+    # Generous default timeout for heavy forecasts (2 hours)
+    return Queue(os.getenv("TSF_RQ_QUEUE", "tsf"), connection=_redis(), default_timeout=7200)
 
 class StartRequest(BaseModel):
     target_value: str
@@ -52,7 +53,8 @@ def start(req: StartRequest = Body(...)):
         "jobs_dir": str(JOBS_DIR),
     }
     q = _queue()
-    job = q.enqueue("backend.worker.classical_worker.run_job", kwargs=payload, job_id=job_id, ttl=86400, result_ttl=86400)
+    # Explicit timeout per job as well (2 hours) and keep result meta for a day
+    job = q.enqueue("backend.worker.classical_worker.run_job", kwargs=payload, job_id=job_id, ttl=86400, result_ttl=86400, timeout=7200)
     return {"job_id": job.id, "state": job.get_status(refresh=False) or "queued"}
 
 @router.get("/status")
@@ -69,7 +71,12 @@ def status(job_id: str):
     if "message" in meta:
         resp["message"] = str(meta["message"])
     if state == "failed" and job.exc_info:
-        resp["message"] = "failed"
+        # surface the exception class line in message for quicker debugging
+        try:
+            first_line = job.exc_info.strip().splitlines()[-1]
+        except Exception:
+            first_line = "failed"
+        resp["message"] = first_line
     return resp
 
 @router.get("/download")
