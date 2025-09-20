@@ -9,6 +9,12 @@ import numpy as np
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import os
+# --- Neon/libpq env fixes (do not touch forecast logic) ---
+for _k in ["DATABASE_URL", "NEON_DATABASE_URL", "PGCHANNELBINDING"]:
+    if _k in os.environ and isinstance(os.environ[_k], str):
+        os.environ[_k] = os.environ[_k].strip()
+os.environ["PGCHANNELBINDING"] = os.environ.get("PGCHANNELBINDING", "disable").strip()
 router = APIRouter()
 
 # ---------- Paths ----------
@@ -72,7 +78,10 @@ def _get_conn():
         dsn = re.sub(r"^(postgresql?|postgres)\+psycopg2?://", r"\1://", dsn, flags=re.I)
         if "sslmode=" not in dsn:
             dsn += ("&" if "?" in dsn else "?") + "sslmode=require"
-        return psycopg2.connect(dsn, cursor_factory=RealDictCursor)
+        __conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor)
+        with __conn.cursor() as __cur:
+            __cur.execute("SET search_path TO air_quality_demo_data, public")
+        return __conn
     host = os.getenv("NEON_HOST")
     db   = os.getenv("NEON_DB")
     user = os.getenv("NEON_USER")
@@ -80,10 +89,13 @@ def _get_conn():
     port = os.getenv("NEON_PORT", "5432")
     if not all([host, db, user, pwd]):
         raise HTTPException(status_code=500, detail="Neon connection env vars not set (DATABASE_URL or NEON_*).")
-    return psycopg2.connect(
+    __conn = psycopg2.connect(
         host=host, dbname=db, user=user, password=pwd, port=port,
         cursor_factory=RealDictCursor, sslmode="require"
     )
+        with __conn.cursor() as __cur:
+            __cur.execute("SET search_path TO air_quality_demo_data, public")
+        return __conn
 
 DEFAULT_TABLE = os.getenv("TSF_TABLE", 'demo_air_quality.air_quality_raw')
 
