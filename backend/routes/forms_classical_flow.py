@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, Request, Form, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -11,11 +10,17 @@ from datetime import datetime
 router = APIRouter(prefix="/forms", tags=["forms"])
 templates = Jinja2Templates(directory="backend/templates")
 
+# Use unqualified table name; rely on search_path
 DB_TABLE = "air_quality_raw"
 
+# Optional separate engine for staging_historical inserts (engine.air_quality_engine_research)
 ENGINE_DATABASE_URL = os.getenv("ENGINE_DATABASE_URL", "").strip()
 ENGINE_STAGING_TABLE = os.getenv("ENGINE_STAGING_TABLE", "engine.staging_historical")
 engine2 = create_engine(ENGINE_DATABASE_URL) if ENGINE_DATABASE_URL else None
+
+def _set_search_path(conn):
+    # Ensure the app resolves tables in your canonical schema first
+    conn.execute(text("SET search_path TO air_quality_demo_data, public"))
 
 def _list_params():
     sql = f"""
@@ -25,8 +30,9 @@ def _list_params():
         ORDER BY "Parameter Name"
     """
     with app_engine.begin() as conn:
-        conn.execute(text(\'SET search_path TO air_quality_demo_data, public\'))
-        return [r["param"] for r in conn.execute(text(sql)).mappings().all()]
+        _set_search_path(conn)
+        rows = conn.execute(text(sql)).mappings().all()
+    return [r["param"] for r in rows]
 
 def _list_states():
     sql = f"""
@@ -36,8 +42,9 @@ def _list_states():
         ORDER BY "State Name"
     """
     with app_engine.begin() as conn:
-        conn.execute(text(\'SET search_path TO air_quality_demo_data, public\'))
-        return [r["state"] for r in conn.execute(text(sql)).mappings().all()]
+        _set_search_path(conn)
+        rows = conn.execute(text(sql)).mappings().all()
+    return [r["state"] for r in rows]
 
 def _daily_mean_df(parameter: str, state: str) -> pd.DataFrame:
     sql = f"""
@@ -48,15 +55,15 @@ def _daily_mean_df(parameter: str, state: str) -> pd.DataFrame:
         ORDER BY DATE("Date Local")
     """
     with app_engine.begin() as conn:
-        conn.execute(text(\'SET search_path TO air_quality_demo_data, public\'))
+        _set_search_path(conn)
         rows = conn.execute(text(sql), {"parameter": parameter, "state": state}).mappings().all()
     if not rows:
         raise HTTPException(status_code=404, detail="No rows found for that Parameter/State.")
-    df = pd.DataFrame(rows).rename(columns={"date":"DATE","value":"VALUE"})
+    df = pd.DataFrame(rows).rename(columns={"date": "DATE", "value": "VALUE"})
     return df
 
 def _safe_name(x: str) -> str:
-    return "".join(c for c in x if c.isalnum() or c in ("-","_"," ")).strip().replace(" ","_")
+    return "".join(c for c in x if c.isalnum() or c in ("-", "_", " ")).strip().replace(" ", "_")
 
 def _write_csv(df: pd.DataFrame, folder: str, filename: str) -> str:
     os.makedirs(folder, exist_ok=True)
@@ -64,17 +71,22 @@ def _write_csv(df: pd.DataFrame, folder: str, filename: str) -> str:
     df.to_csv(fpath, index=False)
     return fpath
 
+def _require_base_url() -> str:
+    base = os.getenv("BACKEND_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(status_code=500, detail="BACKEND_BASE_URL env var is required for classical chaining.")
+    return base
+
 def _call_classical_start(parameter: str, state: str) -> str:
-    url = os.getenv("CLASSICAL_START_URL", "/classical/start")
-    if url.startswith("/"):
-        url = os.getenv("BACKEND_BASE_URL", "").rstrip("/") + url
+    base = _require_base_url()
+    url = f"{base}/classical/start"
     payload = {
         "target_value": parameter,
         "state_name": state,
         "agg": "mean",
         "ftype": "F",
     }
-    r = requests.post(url, json=payload, timeout=10)
+    r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
     data = r.json()
     job_id = data.get("job_id")
@@ -82,30 +94,27 @@ def _call_classical_start(parameter: str, state: str) -> str:
         raise HTTPException(status_code=500, detail="No job_id returned from classical/start")
     return job_id
 
-def _wait_for_job(job_id: str, timeout_sec: int = 180) -> dict:
-    status_url = os.getenv("CLASSICAL_STATUS_URL", "/classical/status")
-    if status_url.startswith("/"):
-        status_url = os.getenv("BACKEND_BASE_URL", "").rstrip("/") + status_url
+def _wait_for_job(job_id: str, timeout_sec: int = 240) -> dict:
+    base = _require_base_url()
+    url = f"{base}/classical/status"
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
-        rr = requests.get(status_url, params={"job_id": job_id}, timeout=10)
+        rr = requests.get(url, params={"job_id": job_id}, timeout=10)
         rr.raise_for_status()
         st = rr.json()
         if st.get("state") == "ready":
             return st
-        if st.get("state") in ("error","failed"):
-            raise HTTPException(status_code=500, detail=st.get("message","classical job failed"))
+        if st.get("state") in ("error", "failed"):
+            raise HTTPException(status_code=500, detail=st.get("message", "classical job failed"))
         time.sleep(1.0)
     raise HTTPException(status_code=504, detail="Timeout waiting for classical job")
 
 def _download_job_csv(job_id: str) -> pd.DataFrame:
-    dl_url = os.getenv("CLASSICAL_DOWNLOAD_URL", "/classical/download")
-    if dl_url.startswith("/"):
-        dl_url = os.getenv("BACKEND_BASE_URL", "").rstrip("/") + dl_url
-    rr = requests.get(dl_url, params={"job_id": job_id}, timeout=30)
+    base = _require_base_url()
+    url = f"{base}/classical/download"
+    rr = requests.get(url, params={"job_id": job_id}, timeout=30)
     rr.raise_for_status()
-    df = pd.read_csv(io.StringIO(rr.text))
-    return df
+    return pd.read_csv(io.StringIO(rr.text))
 
 def _insert_to_staging(df: pd.DataFrame, parameter: str, state: str, forecast_id: str):
     if not engine2:
@@ -120,7 +129,7 @@ def _insert_to_staging(df: pd.DataFrame, parameter: str, state: str, forecast_id
             VALUES (:date, :value, :parameter_name, :state_name, :forecast_id)
         """
         try:
-            recs = tmp[["DATE","VALUE","parameter_name","state_name","forecast_id"]].to_dict(orient="records")
+            recs = tmp[["DATE", "VALUE", "parameter_name", "state_name", "forecast_id"]].to_dict(orient="records")
             with engine2.begin() as conn:
                 for r in recs:
                     conn.execute(text(ins_sql), {
@@ -131,6 +140,7 @@ def _insert_to_staging(df: pd.DataFrame, parameter: str, state: str, forecast_id
                         "forecast_id": r["forecast_id"],
                     })
         except Exception:
+            # best-effort; don't block download
             pass
 
 @router.get("/classical", response_class=HTMLResponse)
@@ -141,22 +151,25 @@ def classical_form(request: Request):
 
 @router.post("/classical/run")
 def classical_run(parameter: str = Form(...), state: str = Form(...)):
+    # 1) RAW aggregation
     df_raw = _daily_mean_df(parameter, state)
     today = datetime.utcnow().strftime("%Y%m%d")
     safe_param = _safe_name(parameter)
     safe_state = _safe_name(state)
-    raw_name = f"{safe_param}_{safe_state}_{today}_raw.csv"
     jobs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "_jobs"))
-    raw_path = _write_csv(df_raw, jobs_dir, raw_name)
+    raw_name = f"{safe_param}_{safe_state}_{today}_raw.csv"
+    _write_csv(df_raw, jobs_dir, raw_name)
 
+    # 2) Run classical, wait, download
     job_id = _call_classical_start(parameter, state)
-    _ = _wait_for_job(job_id, timeout_sec=180)
+    _ = _wait_for_job(job_id, timeout_sec=240)
     df_final = _download_job_csv(job_id)
     df_final.insert(0, "forecast_id", job_id)
 
+    # 3) Save final CSV and insert to staging
     final_name = f"{safe_param}_{safe_state}_{today}.csv"
     final_path = _write_csv(df_final, jobs_dir, final_name)
-
     _insert_to_staging(df_final, parameter, state, job_id)
 
+    # 4) Return final file
     return FileResponse(final_path, media_type="text/csv", filename=final_name)
