@@ -4,7 +4,7 @@ from backend.database import engine
 
 router = APIRouter(prefix="/data", tags=["data"])
 
-DB_SCHEMA = "air_quality_demo_data"
+DB_SCHEMA = "demo_air_quality"
 TABLE = f"{DB_SCHEMA}.air_quality_raw"
 
 def _safe_query(sql: str, params: dict):

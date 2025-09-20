@@ -5,7 +5,7 @@ import pandas as pd
 
 router = APIRouter(prefix="/aggregate", tags=["aggregate"])
 
-DB_SCHEMA = "air_quality_demo_data"
+DB_SCHEMA = "demo_air_quality"
 TABLE = f"{DB_SCHEMA}.air_quality_raw"
 
 @router.get("/state_daily")

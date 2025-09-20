@@ -7,8 +7,5 @@ psycopg2-binary==2.9.9
 python-dotenv==1.0.1
 SQLAlchemy==2.0.29
 psycopg[binary]==3.1.19
-python-multipart==0.0.9
-jinja2
-
 
 
