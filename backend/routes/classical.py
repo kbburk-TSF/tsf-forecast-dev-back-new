@@ -8,7 +8,7 @@ os.environ["PGCHANNELBINDING"] = os.environ.get("PGCHANNELBINDING", "disable").s
 
 import json
 import threading
-from typing import Optional, Tuple, List
+from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from fastapi.params import Body
@@ -100,7 +100,6 @@ def _ensure_positive(y: pd.Series) -> bool:
     return (y > 0).all()
 
 def _forecast_daily_path(y_train: pd.Series, horizon_dates: pd.DatetimeIndex, model: str) -> pd.Series:
-    # y_train is daily, indexed by date; horizon_dates are daily dates to forecast
     steps = len(horizon_dates)
     if steps <= 0:
         return pd.Series(index=horizon_dates, dtype=float)
@@ -123,7 +122,6 @@ def _forecast_daily_path(y_train: pd.Series, horizon_dates: pd.DatetimeIndex, mo
             fit = Holt(y_train, exponential=False, damped_trend=True, initialization_method="estimated").fit(optimized=True)
             fc = fit.forecast(steps)
         except Exception:
-            # fallback simple EW forecast
             last = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
             fc = pd.Series([last]*steps, index=horizon_dates)
 
@@ -138,43 +136,57 @@ def _forecast_daily_path(y_train: pd.Series, horizon_dates: pd.DatetimeIndex, mo
     else:
         raise ValueError("Unknown model")
 
-    # Align index
     if not isinstance(fc, pd.Series):
         fc = pd.Series(fc, index=horizon_dates)
     else:
         fc.index = horizon_dates
     return fc
 
-def _build_final(daily: pd.DataFrame, status_cb):
+def _build_final(daily: pd.DataFrame, progress_fn):
     idx_daily = daily["DATE"]
     y = daily.set_index("DATE")["VALUE"].asfreq("D").interpolate(limit_direction="both")
 
-    # MONTHLY roll-forward
-    status_cb("monthly", 40)
+    # determine total steps for progress: (n_months-1)*3 + (n_quarters-1)*3
     m_starts = y.resample("MS").mean().index
+    q_starts = y.resample("QS").mean().index
+    total_steps = max(0, (len(m_starts)-1)*3) + max(0, (len(q_starts)-1)*3)
+    done = 0
+
+    def step(model_label, period_label):
+        nonlocal done
+        done += 1
+        # Scale progress from 10%..90% across steps
+        pct = 10 + int(80 * (done / max(1, total_steps)))
+        progress_fn(f"{model_label}", pct, message=period_label)
+
+    # MONTHLY roll-forward
+    progress_fn("monthly", 20, message="initializing")
     ses_m = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
     holt_m = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
     arima_m = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
     for i in range(1, len(m_starts)):
-        # horizon = full month i
         start = m_starts[i]
         end = start + pd.offsets.MonthEnd(0)
         horizon = pd.date_range(start=start, end=end, freq="D")
-        # train = up to end of previous month
         train_end = start - pd.Timedelta(days=1)
         y_train = y.loc[:train_end].dropna()
         if y_train.empty:
             continue
-        ses_fc   = _forecast_daily_path(y_train, horizon, "SES")
-        holt_fc  = _forecast_daily_path(y_train, horizon, "HOLT")
+        # SES
+        ses_fc = _forecast_daily_path(y_train, horizon, "SES")
+        ses_m = pd.concat([ses_m, ses_fc])
+        step("monthly: SES", f"{start.date()} ({i}/{len(m_starts)-1})")
+        # HOLT
+        holt_fc = _forecast_daily_path(y_train, horizon, "HOLT")
+        holt_m = pd.concat([holt_m, holt_fc])
+        step("monthly: HOLT", f"{start.date()} ({i}/{len(m_starts)-1})")
+        # ARIMA
         arima_fc = _forecast_daily_path(y_train, horizon, "ARIMA")
-        ses_m   = pd.concat([ses_m, ses_fc])
-        holt_m  = pd.concat([holt_m, holt_fc])
         arima_m = pd.concat([arima_m, arima_fc])
+        step("monthly: ARIMA", f"{start.date()} ({i}/{len(m_starts)-1})")
 
     # QUARTERLY roll-forward
-    status_cb("quarterly", 70)
-    q_starts = y.resample("QS").mean().index
+    progress_fn("quarterly", 60, message="initializing")
     ses_q = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
     holt_q = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
     arima_q = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
@@ -186,12 +198,18 @@ def _build_final(daily: pd.DataFrame, status_cb):
         y_train = y.loc[:train_end].dropna()
         if y_train.empty:
             continue
-        ses_fc   = _forecast_daily_path(y_train, horizon, "SES")
-        holt_fc  = _forecast_daily_path(y_train, horizon, "HOLT")
+        # SES
+        ses_fc = _forecast_daily_path(y_train, horizon, "SES")
+        ses_q = pd.concat([ses_q, ses_fc])
+        step("quarterly: SES", f"{start.date()} ({i}/{len(q_starts)-1})")
+        # HOLT
+        holt_fc = _forecast_daily_path(y_train, horizon, "HOLT")
+        holt_q = pd.concat([holt_q, holt_fc])
+        step("quarterly: HOLT", f"{start.date()} ({i}/{len(q_starts)-1})")
+        # ARIMA
         arima_fc = _forecast_daily_path(y_train, horizon, "ARIMA")
-        ses_q   = pd.concat([ses_q, ses_fc])
-        holt_q  = pd.concat([holt_q, holt_fc])
         arima_q = pd.concat([arima_q, arima_fc])
+        step("quarterly: ARIMA", f"{start.date()} ({i}/{len(q_starts)-1})")
 
     # Final window: from first historical day to last covered forecast day
     last_day = pd.Timestamp(max([
@@ -229,11 +247,11 @@ def start(req: StartRequest = Body(...)):
             _status_write(job_id, "loading-data", progress=10)
             daily = _load_daily(req.target_value, req.state_name, req.county_name, req.city_name, req.cbsa_name)
 
-            def _cb(state, prog):
-                _status_write(job_id, state, progress=prog)
+            def _cb(state, prog, message=None):
+                _status_write(job_id, state, message=message, progress=prog)
 
             final = _build_final(daily, _cb)
-            _status_write(job_id, "finalizing", progress=90)
+            _status_write(job_id, "finalizing", progress=95)
             final.to_csv(_csv_file(job_id), index=False)
             _status_write(job_id, "ready", progress=100)
         except Exception as e:
