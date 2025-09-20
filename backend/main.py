@@ -7,7 +7,7 @@ from backend.routes.data import router as data_router
 from backend.routes.aggregate import router as aggregate_router
 from backend.routes.meta import router as meta_router
 from backend.routes.classical import router as classical_router
-from backend.routes.forms_raw import router as forms_router
+from backend.routes.forms_classical_flow import router as forms_router
 import os
 from pathlib import Path
 
@@ -15,7 +15,6 @@ APP_VERSION = os.getenv("APP_VERSION", None)
 
 app = FastAPI(title="TSF Backend", version=APP_VERSION or "dev")
 
-# CORS (env-driven; defaults to "*")
 env_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
 allowed = [o.strip() for o in env_origins.split(",") if o.strip()] or ["*"]
 app.add_middleware(
@@ -26,7 +25,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routers
 app.include_router(data_router)
 app.include_router(aggregate_router)
 app.include_router(meta_router)
@@ -38,7 +36,7 @@ def root():
     return {
         "ok": True,
         "service": "tsf-backend",
-        "forms": "/forms/raw",
+        "forms": { "classical": "/forms/classical" },
         "docs": "/docs",
         "health": "/health",
     }
@@ -54,7 +52,6 @@ def health():
 
 @app.get("/version", tags=["meta"])
 def version():
-    # Prefer env var if set; else read local VERSION file; else return "unknown"
     if APP_VERSION:
         return {"version": APP_VERSION}
     try:
