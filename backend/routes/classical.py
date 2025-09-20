@@ -32,6 +32,23 @@ DEFAULT_TABLE = os.getenv("TSF_TABLE", "air_quality_raw")
 JOBS_DIR = Path(__file__).resolve().parent.parent / "_jobs"
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
+# -------- progress utilities --------
+def _job_file(job_id: str) -> Path:
+    return JOBS_DIR / f"{job_id}.json"
+
+def _csv_file(job_id: str) -> Path:
+    return JOBS_DIR / f"{job_id}.csv"
+
+def _status_write(job_id: str, state: str, message: str = None, progress: int = None):
+    payload = {"job_id": job_id, "state": state}
+    if message is not None:
+        payload["message"] = message
+    if progress is not None:
+        payload["progress"] = int(progress)
+    _job_file(job_id).write_text(json.dumps(payload))
+
+# ------------------------------------
+
 def _get_conn():
     dsn = os.getenv("DATABASE_URL", "").strip()
     if not dsn:
@@ -79,115 +96,117 @@ def _load_daily(parameter: str, state: Optional[str], county: Optional[str], cit
     df = df.sort_values("DATE").reset_index(drop=True)
     return df
 
-def _resample_period_means(df_daily: pd.DataFrame, freq: str) -> pd.Series:
-    return df_daily.set_index("DATE")["VALUE"].resample(freq).mean().dropna()
+def _ensure_positive(y: pd.Series) -> bool:
+    return (y > 0).all()
 
-def _rolling_forecast_monthly(y_m: pd.Series) -> pd.Series:
-    # Walk-forward: for i=1..n-1, fit on 0..i-1, predict month i; no beyond-history month.
-    idx = y_m.index
-    n = len(y_m)
-    f_ses = pd.Series(index=idx, dtype=float)
-    f_holt = pd.Series(index=idx, dtype=float)
-    f_arima = pd.Series(index=idx, dtype=float)
-    for i in range(1, n):
-        y_train = y_m.iloc[:i]
-        # SES = ETS ZZZ with multiplicative trend -> ExponentialSmoothing with trend='mul'
-        try:
-            ses_model = ExponentialSmoothing(y_train, trend='mul', seasonal=None, initialization_method="estimated")
-            ses_fit = ses_model.fit(optimized=True)
-            f_ses.iloc[i] = float(ses_fit.forecast(1)[0])
-        except Exception:
-            f_ses.iloc[i] = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
-        # HOLT = two-parameter, additive, damped
-        try:
-            holt_model = Holt(y_train, exponential=False, damped_trend=True, initialization_method="estimated")
-            holt_fit = holt_model.fit(optimized=True)
-            f_holt.iloc[i] = float(holt_fit.forecast(1)[0])
-        except Exception:
-            f_holt.iloc[i] = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
-        # ARIMA = auto.arima
-        try:
-            arima_model = pm.auto_arima(y_train, seasonal=False, stepwise=True, suppress_warnings=True, error_action="ignore")
-            f_arima.iloc[i] = float(arima_model.predict(1)[0])
-        except Exception:
-            f_arima.iloc[i] = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
-    # Expand to daily spans for each predicted month (fill across that month’s calendar days)
-    out_idx = pd.date_range(start=y_m.index.min(), end=y_m.index.max() + pd.offsets.MonthEnd(0), freq="D")
-    ses_d = pd.Series(index=out_idx, dtype=float)
-    holt_d = pd.Series(index=out_idx, dtype=float)
-    arima_d = pd.Series(index=out_idx, dtype=float)
-    for i in range(1, n):
-        start = idx[i]
-        end = (start + pd.offsets.MonthEnd(0))
-        span = pd.date_range(start=start, end=end, freq="D")
-        ses_d.loc[span] = f_ses.iloc[i]
-        holt_d.loc[span] = f_holt.iloc[i]
-        arima_d.loc[span] = f_arima.iloc[i]
-    return ses_d, holt_d, arima_d
+def _forecast_daily_path(y_train: pd.Series, horizon_dates: pd.DatetimeIndex, model: str) -> pd.Series:
+    # y_train is daily, indexed by date; horizon_dates are daily dates to forecast
+    steps = len(horizon_dates)
+    if steps <= 0:
+        return pd.Series(index=horizon_dates, dtype=float)
 
-def _rolling_forecast_quarterly(y_q: pd.Series) -> pd.Series:
-    idx = y_q.index
-    n = len(y_q)
-    f_ses = pd.Series(index=idx, dtype=float)
-    f_holt = pd.Series(index=idx, dtype=float)
-    f_arima = pd.Series(index=idx, dtype=float)
-    for i in range(1, n):
-        y_train = y_q.iloc[:i]
+    if model == "SES":
+        # multiplicative trend requires positives; fallback to additive if not
+        if _ensure_positive(y_train):
+            try:
+                fit = ExponentialSmoothing(y_train, trend='mul', seasonal=None, initialization_method="estimated").fit(optimized=True)
+                fc = fit.forecast(steps)
+            except Exception:
+                fit = ExponentialSmoothing(y_train, trend='add', seasonal=None, initialization_method="estimated").fit(optimized=True)
+                fc = fit.forecast(steps)
+        else:
+            fit = ExponentialSmoothing(y_train, trend='add', seasonal=None, initialization_method="estimated").fit(optimized=True)
+            fc = fit.forecast(steps)
+
+    elif model == "HOLT":
         try:
-            ses_model = ExponentialSmoothing(y_train, trend='mul', seasonal=None, initialization_method="estimated")
-            ses_fit = ses_model.fit(optimized=True)
-            f_ses.iloc[i] = float(ses_fit.forecast(1)[0])
+            fit = Holt(y_train, exponential=False, damped_trend=True, initialization_method="estimated").fit(optimized=True)
+            fc = fit.forecast(steps)
         except Exception:
-            f_ses.iloc[i] = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
+            # fallback simple EW forecast
+            last = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
+            fc = pd.Series([last]*steps, index=horizon_dates)
+
+    elif model == "ARIMA":
         try:
-            holt_model = Holt(y_train, exponential=False, damped_trend=True, initialization_method="estimated")
-            holt_fit = holt_model.fit(optimized=True)
-            f_holt.iloc[i] = float(holt_fit.forecast(1)[0])
+            arma = pm.auto_arima(y_train, seasonal=False, stepwise=True, suppress_warnings=True, error_action="ignore")
+            fc_vals = arma.predict(steps)
+            fc = pd.Series(fc_vals, index=horizon_dates)
         except Exception:
-            f_holt.iloc[i] = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
-        try:
-            arima_model = pm.auto_arima(y_train, seasonal=False, stepwise=True, suppress_warnings=True, error_action="ignore")
-            f_arima.iloc[i] = float(arima_model.predict(1)[0])
-        except Exception:
-            f_arima.iloc[i] = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
-    # Expand to daily spans for each predicted quarter (fill across that quarter’s calendar days)
-    out_idx = pd.date_range(start=y_q.index.min(), end=y_q.index.max() + pd.offsets.QuarterEnd(startingMonth=12), freq="D")
-    ses_d = pd.Series(index=out_idx, dtype=float)
-    holt_d = pd.Series(index=out_idx, dtype=float)
-    arima_d = pd.Series(index=out_idx, dtype=float)
-    for i in range(1, n):
-        start = idx[i]
-        end = (start + pd.offsets.QuarterEnd(startingMonth=12))
-        span = pd.date_range(start=start, end=end, freq="D")
-        ses_d.loc[span] = f_ses.iloc[i]
-        holt_d.loc[span] = f_holt.iloc[i]
-        arima_d.loc[span] = f_arima.iloc[i]
-    return ses_d, holt_d, arima_d
+            last = y_train.ewm(alpha=0.3, adjust=False).mean().iloc[-1]
+            fc = pd.Series([last]*steps, index=horizon_dates)
+    else:
+        raise ValueError("Unknown model")
 
-def _build_final(df_daily: pd.DataFrame) -> pd.DataFrame:
-    # Resample to period means
-    y_m = _resample_period_means(df_daily, "MS")   # months start
-    y_q = _resample_period_means(df_daily, "QS")   # quarters start
+    # Align index
+    if not isinstance(fc, pd.Series):
+        fc = pd.Series(fc, index=horizon_dates)
+    else:
+        fc.index = horizon_dates
+    return fc
 
-    # Rolling forecasts per spec (start at 2nd period, span full month/quarter, no beyond-history)
-    ses_m_d, holt_m_d, arima_m_d = _rolling_forecast_monthly(y_m)
-    ses_q_d, holt_q_d, arima_q_d = _rolling_forecast_quarterly(y_q)
+def _build_final(daily: pd.DataFrame, status_cb):
+    idx_daily = daily["DATE"]
+    y = daily.set_index("DATE")["VALUE"].asfreq("D").interpolate(limit_direction="both")
 
-    # Final daily index: from first history day to last day covered by any fill
-    last_day = max(
-        x.index[~x.isna()].max() for x in [ses_m_d, holt_m_d, arima_m_d, ses_q_d, holt_q_d, arima_q_d]
-        if (~x.isna()).any()
-    )
-    daily_idx = pd.date_range(start=df_daily["DATE"].min(), end=last_day, freq="D")
+    # MONTHLY roll-forward
+    status_cb("monthly", 40)
+    m_starts = y.resample("MS").mean().index
+    ses_m = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+    holt_m = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+    arima_m = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+    for i in range(1, len(m_starts)):
+        # horizon = full month i
+        start = m_starts[i]
+        end = start + pd.offsets.MonthEnd(0)
+        horizon = pd.date_range(start=start, end=end, freq="D")
+        # train = up to end of previous month
+        train_end = start - pd.Timedelta(days=1)
+        y_train = y.loc[:train_end].dropna()
+        if y_train.empty:
+            continue
+        ses_fc   = _forecast_daily_path(y_train, horizon, "SES")
+        holt_fc  = _forecast_daily_path(y_train, horizon, "HOLT")
+        arima_fc = _forecast_daily_path(y_train, horizon, "ARIMA")
+        ses_m   = pd.concat([ses_m, ses_fc])
+        holt_m  = pd.concat([holt_m, holt_fc])
+        arima_m = pd.concat([arima_m, arima_fc])
 
-    out = pd.DataFrame(index=daily_idx)
-    out["VALUE"]   = df_daily.set_index("DATE")["VALUE"].reindex(daily_idx)
-    out["SES-M"]   = ses_m_d.reindex(daily_idx)
-    out["HWES-M"]  = holt_m_d.reindex(daily_idx)
-    out["ARIMA-M"] = arima_m_d.reindex(daily_idx)
-    out["SES-Q"]   = ses_q_d.reindex(daily_idx)
-    out["HWES-Q"]  = holt_q_d.reindex(daily_idx)
-    out["ARIMA-Q"] = arima_q_d.reindex(daily_idx)
+    # QUARTERLY roll-forward
+    status_cb("quarterly", 70)
+    q_starts = y.resample("QS").mean().index
+    ses_q = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+    holt_q = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+    arima_q = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+    for i in range(1, len(q_starts)):
+        start = q_starts[i]
+        end = start + pd.offsets.QuarterEnd(startingMonth=12)
+        horizon = pd.date_range(start=start, end=end, freq="D")
+        train_end = start - pd.Timedelta(days=1)
+        y_train = y.loc[:train_end].dropna()
+        if y_train.empty:
+            continue
+        ses_fc   = _forecast_daily_path(y_train, horizon, "SES")
+        holt_fc  = _forecast_daily_path(y_train, horizon, "HOLT")
+        arima_fc = _forecast_daily_path(y_train, horizon, "ARIMA")
+        ses_q   = pd.concat([ses_q, ses_fc])
+        holt_q  = pd.concat([holt_q, holt_fc])
+        arima_q = pd.concat([arima_q, arima_fc])
+
+    # Final window: from first historical day to last covered forecast day
+    last_day = pd.Timestamp(max([
+        (s.index.max() if len(s.index) else idx_daily.max()) for s in [ses_m, holt_m, arima_m, ses_q, holt_q, arima_q]
+    ]))
+    all_days = pd.date_range(start=idx_daily.min(), end=last_day, freq="D")
+
+    out = pd.DataFrame(index=all_days)
+    out["VALUE"]   = y.reindex(all_days)
+    out["SES-M"]   = ses_m.reindex(all_days)
+    out["HWES-M"]  = holt_m.reindex(all_days)
+    out["ARIMA-M"] = arima_m.reindex(all_days)
+    out["SES-Q"]   = ses_q.reindex(all_days)
+    out["HWES-Q"]  = holt_q.reindex(all_days)
+    out["ARIMA-Q"] = arima_q.reindex(all_days)
     out = out.reset_index().rename(columns={"index":"DATE"})
     return out
 
@@ -200,25 +219,26 @@ class StartRequest(BaseModel):
     agg: str = "mean"
     ftype: str = "F"
 
-def _job_file(job_id: str) -> Path:
-    return JOBS_DIR / f"{job_id}.json"
-
-def _csv_file(job_id: str) -> Path:
-    return JOBS_DIR / f"{job_id}.csv"
-
 @router.post("/start")
 def start(req: StartRequest = Body(...)):
     job_id = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-    jf = _job_file(job_id)
-    jf.write_text(json.dumps({"job_id": job_id, "state": "queued"}))
+    _status_write(job_id, "queued", progress=5)
+
     def _run():
         try:
+            _status_write(job_id, "loading-data", progress=10)
             daily = _load_daily(req.target_value, req.state_name, req.county_name, req.city_name, req.cbsa_name)
-            final = _build_final(daily)
+
+            def _cb(state, prog):
+                _status_write(job_id, state, progress=prog)
+
+            final = _build_final(daily, _cb)
+            _status_write(job_id, "finalizing", progress=90)
             final.to_csv(_csv_file(job_id), index=False)
-            jf.write_text(json.dumps({"job_id": job_id, "state": "ready"}))
+            _status_write(job_id, "ready", progress=100)
         except Exception as e:
-            jf.write_text(json.dumps({"job_id": job_id, "state": "error", "message": str(e)}))
+            _status_write(job_id, "error", message=str(e))
+
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id, "state": "queued"}
 
