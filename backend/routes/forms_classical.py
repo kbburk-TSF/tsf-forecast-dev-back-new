@@ -16,7 +16,7 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-SCHEMA = "air_quality_demo_data"
+SCHEMA = "public"
 TABLE_FQ = f'{SCHEMA}."air_quality_raw"'
 COL_PARAM = '"Parameter Name"'
 COL_STATE = '"State Name"'

@@ -1,0 +1,11 @@
+{
+  "applied_at_utc": "2025-09-20T18:10:58.482033Z",
+  "changed_files_count": 2,
+  "marker": "SCHEMA_FIX_APPLIED",
+  "sample_changed_files": [
+    "routes/forms_classical.py",
+    "routes/classical.py"
+  ],
+  "schema": "public",
+  "table": "public.\"air_quality_raw\""
+}
