@@ -4,8 +4,9 @@ from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 import psycopg
 from psycopg.rows import tuple_row
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-router = APIRouter()
+router = APIRouter(prefix="/forms", tags=["forms"])
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 SCHEMA = "air_quality_demo_data"
@@ -19,12 +20,22 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "backend", "data", "output")
 STAGING_HISTORICAL_DIR = os.getenv("STAGING_HISTORICAL_DIR", os.path.join(os.getcwd(), "staging_historical"))
 os.makedirs(STAGING_HISTORICAL_DIR, exist_ok=True)
 
+def _clean_dsn(dsn: str) -> str:
+    if not dsn:
+        return dsn
+    if "channel_binding=" in dsn and "://" not in dsn:
+        parts = [tok for tok in dsn.split() if not tok.lower().startswith("channel_binding=")]
+        return " ".join(parts)
+    if "://" in dsn:
+        p = urlparse(dsn)
+        q = [(k, v) for (k, v) in parse_qsl(p.query, keep_blank_values=True) if k.lower() != "channel_binding"]
+        dsn = urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(q), p.fragment))
+    return dsn
+
 def _conn():
-    if not DATABASE_URL:
+    dsn = _clean_dsn(DATABASE_URL or "")
+    if not dsn:
         raise RuntimeError("DATABASE_URL is not set")
-    dsn = DATABASE_URL
-    if "channel_binding=" in dsn:
-        dsn = " ".join(tok for tok in dsn.split() if not tok.lower().startswith("channel_binding="))
     conn = psycopg.connect(dsn, row_factory=tuple_row)
     with conn.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}, public")
@@ -87,12 +98,13 @@ HTML = """<!doctype html>
     .actions { grid-column: 1 / -1; display: flex; gap: 12px; }
     button { padding: 10px 16px; border: 0; border-radius: 6px; cursor: pointer; background: #1f6feb; color: #fff; }
     a.button { text-decoration: none; background: #eee; color: #111; padding: 10px 16px; border-radius: 6px; display: inline-block; }
+    .err { background:#fee; border:1px solid #f88; padding:10px; border-radius:6px; margin-bottom:16px; }
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Classical Forecast - Backend Form</h1>
-
+  {ERROR}
   <form method="post" action="/forms/classical/start">
     <div>
       <label for="parameter">Target (Parameter Name)</label>
@@ -100,14 +112,12 @@ HTML = """<!doctype html>
         {PARAM_OPTIONS}
       </select>
     </div>
-
     <div>
       <label for="state">State Name</label>
       <select id="state" name="state" required>
         {STATE_OPTIONS}
       </select>
     </div>
-
     <div class="actions">
       <button type="submit">Run Classical</button>
       <a class="button" href="/forms/classical">Reset</a>
@@ -119,10 +129,15 @@ HTML = """<!doctype html>
 
 @router.get("/classical", response_class=HTMLResponse)
 def get_form(request: Request, parameter: Optional[str] = None):
-    params = list_parameters()
-    states = list_states_for_param(parameter if parameter else None)
-    html = HTML.replace("{PARAM_OPTIONS}", _options(params, selected=parameter)).replace("{STATE_OPTIONS}", _options(states))
-    return HTMLResponse(html, status_code=200)
+    try:
+        params = list_parameters()
+        states = list_states_for_param(parameter if parameter else None)
+        html = HTML.replace("{PARAM_OPTIONS}", _options(params, selected=parameter)).replace("{STATE_OPTIONS}", _options(states)).replace("{ERROR}","")
+        return HTMLResponse(html, status_code=200)
+    except Exception as e:
+        err = f'<div class="err"><strong>DB error:</strong> { _esc(str(e)) }</div>'
+        html = HTML.replace("{PARAM_OPTIONS}","").replace("{STATE_OPTIONS}","").replace("{ERROR}", err)
+        return HTMLResponse(html, status_code=200)
 
 @router.post("/classical/start")
 def start_from_form(parameter: str = Form(...), state: str = Form(...)):
@@ -131,7 +146,7 @@ def start_from_form(parameter: str = Form(...), state: str = Form(...)):
 
 @router.get("/classical/next", response_class=HTMLResponse)
 def after_start(request: Request, parameter: str, state: str):
-    html = f"""<!doctype html>
+    body = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Classical - Run</title></head><body>
 <h2>Run Classical</h2>
 <form method="post" action="/classical/start">
@@ -139,12 +154,12 @@ def after_start(request: Request, parameter: str, state: str):
   <input type="hidden" name="state" value="{_esc(state)}" />
   <button type="submit">Start Job</button>
 </form>
-<p>After you click "Start Job", you'll receive JSON with <code>job_id</code>.</p>
+<p>After you click "Start Job", you will receive JSON with <code>job_id</code>.</p>
 <p>Then use: <code>/classical/status?job_id=...</code> and <code>/classical/download?job_id=...</code>.</p>
 <p>When the CSV exists in <code>{_esc(OUTPUT_DIR)}</code>, copy it to staging via:<br/>
 <code>/forms/classical/copy?parameter={_esc(parameter)}&state={_esc(state)}</code></p>
 </body></html>"""
-    return HTMLResponse(html, status_code=200)
+    return HTMLResponse(body, status_code=200)
 
 @router.get("/classical/copy")
 def copy_to_staging(parameter: str, state: str):
