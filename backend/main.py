@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routes.data import router as data_router
 from backend.routes.aggregate import router as agg_router
-from backend.routes.forecast import router as forecast_router
 from backend.routes.meta import router as meta_router
 from backend.routes.classical import router as classical_router
 import os
@@ -23,7 +22,6 @@ app.add_middleware(
 # Mount routers exactly once
 app.include_router(data_router)
 app.include_router(agg_router)
-app.include_router(forecast_router)
 app.include_router(meta_router)
 app.include_router(classical_router)
 
