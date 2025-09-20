@@ -9,12 +9,6 @@ import numpy as np
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-import os
-# --- Neon/libpq env fixes (no forecast logic changes) ---
-for _k in ["DATABASE_URL", "NEON_DATABASE_URL", "PGCHANNELBINDING"]:
-    if _k in os.environ and isinstance(os.environ[_k], str):
-        os.environ[_k] = os.environ[_k].strip()
-os.environ["PGCHANNELBINDING"] = os.environ.get("PGCHANNELBINDING", "disable").strip()
 router = APIRouter()
 
 # ---------- Paths ----------
@@ -70,7 +64,7 @@ def _monthly_quarterly(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
     return m, q
 
 # ---------- DB Helpers ----------
-def _get_conn_raw():
+def _get_conn():
     import re
     dsn = os.getenv("DATABASE_URL")
     if dsn:
@@ -94,19 +88,6 @@ def _get_conn_raw():
 DEFAULT_TABLE = os.getenv("TSF_TABLE", 'demo_air_quality.air_quality_raw')
 
 # ---------- Load series from Neon ----------
-
-def _get_conn():
-    """Wrapper around original _get_conn_raw that sets the search_path for Neon.
-    No changes to any forecast logic.
-    """
-    conn = _get_conn_raw()
-    try:
-        with conn.cursor() as _c:
-            _c.execute("SET search_path TO air_quality_demo_data, public")
-    except Exception:
-        pass
-    return conn
-
 def _load_series_from_neon(
     db: str,
     target_value: str,
@@ -417,3 +398,40 @@ def classical_download(job_id: str = Query(...)):
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Output not found")
     return FileResponse(path, filename=os.path.basename(path), media_type="text/csv")
+
+
+# ===== BEGIN OPERATIONAL PATCH (no forecast logic changed above) =====
+# This section only adjusts environment/connection behavior and table resolution.
+import os
+try:
+    # Strip stray newlines; set Neon-safe default
+    for _k in ["DATABASE_URL", "NEON_DATABASE_URL", "PGCHANNELBINDING"]:
+        if _k in os.environ and isinstance(os.environ[_k], str):
+            os.environ[_k] = os.environ[_k].strip()
+    os.environ["PGCHANNELBINDING"] = os.environ.get("PGCHANNELBINDING", "disable").strip()
+except Exception:
+    pass
+
+# Ensure search_path is set after connecting, without modifying the original _get_conn body.
+try:
+    _original_get_conn = _get_conn  # preserve original function
+    def _get_conn():
+        conn = _original_get_conn()
+        try:
+            with conn.cursor() as _c:
+                _c.execute("SET search_path TO air_quality_demo_data, public")
+        except Exception:
+            pass
+        return conn
+except NameError:
+    # If _get_conn is not defined for some reason, do nothing.
+    pass
+
+# Avoid bypassing search_path via schema-qualified default, unless TSF_TABLE is explicitly set.
+try:
+    if "DEFAULT_TABLE" in globals() and isinstance(DEFAULT_TABLE, str) and "." in DEFAULT_TABLE and not os.getenv("TSF_TABLE"):
+        # Use unqualified table so search_path resolves the right schema
+        DEFAULT_TABLE = DEFAULT_TABLE.split(".")[-1]
+except Exception:
+    pass
+# ===== END OPERATIONAL PATCH =====
