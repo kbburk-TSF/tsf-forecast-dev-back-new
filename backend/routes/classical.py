@@ -97,7 +97,7 @@ def _get_conn():
         __cur.execute("SET search_path TO air_quality_demo_data, public")
     return __conn
 
-DEFAULT_TABLE = os.getenv("TSF_TABLE", 'air_quality_demo_data.air_quality_raw')
+DEFAULT_TABLE = os.getenv("TSF_TABLE", 'air_quality_raw')
 
 # ---------- Load series from Neon ----------
 def _load_series_from_neon(
