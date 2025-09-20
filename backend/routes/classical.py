@@ -10,7 +10,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 import os
-# --- Neon/libpq env fixes ---
+# --- Neon/libpq env fixes (sanitized) ---
 for _k in ["DATABASE_URL", "NEON_DATABASE_URL", "PGCHANNELBINDING"]:
     if _k in os.environ and isinstance(os.environ[_k], str):
         os.environ[_k] = os.environ[_k].strip()
@@ -79,9 +79,9 @@ def _get_conn():
         if "sslmode=" not in dsn:
             dsn += ("&" if "?" in dsn else "?") + "sslmode=require"
         __conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor)
-        with __conn.cursor() as __cur:
-            __cur.execute("SET search_path TO air_quality_demo_data, public")
-        return __conn
+    with __conn.cursor() as __cur:
+        __cur.execute("SET search_path TO air_quality_demo_data, public")
+    return __conn
     host = os.getenv("NEON_HOST")
     db   = os.getenv("NEON_DB")
     user = os.getenv("NEON_USER")
@@ -93,9 +93,9 @@ def _get_conn():
         host=host, dbname=db, user=user, password=pwd, port=port,
         cursor_factory=RealDictCursor, sslmode="require"
     )
-        with __conn.cursor() as __cur:
-            __cur.execute("SET search_path TO air_quality_demo_data, public")
-        return __conn
+    with __conn.cursor() as __cur:
+        __cur.execute("SET search_path TO air_quality_demo_data, public")
+    return __conn
 
 DEFAULT_TABLE = os.getenv("TSF_TABLE", 'air_quality_demo_data.air_quality_raw')
 
