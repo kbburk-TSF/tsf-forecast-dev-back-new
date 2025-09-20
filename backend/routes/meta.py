@@ -5,7 +5,7 @@ from backend.database import engine
 router = APIRouter(prefix="/data", tags=["metadata"])
 
 DB_SCHEMA_MAP = {
-    "demo_air_quality": {
+    "air_quality_demo_data": {
         "table": "air_quality_raw",
         "target_col": "Parameter Name",
         "value_col": "Arithmetic Mean",

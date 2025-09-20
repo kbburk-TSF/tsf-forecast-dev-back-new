@@ -85,7 +85,7 @@ def _get_conn():
         cursor_factory=RealDictCursor, sslmode="require"
     )
 
-DEFAULT_TABLE = os.getenv("TSF_TABLE", 'demo_air_quality.air_quality_raw')
+DEFAULT_TABLE = os.getenv("TSF_TABLE", 'air_quality_demo_data.air_quality_raw')
 
 # ---------- Load series from Neon ----------
 def _load_series_from_neon(
