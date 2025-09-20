@@ -11,7 +11,7 @@ from datetime import datetime
 router = APIRouter(prefix="/forms", tags=["forms"])
 templates = Jinja2Templates(directory="backend/templates")
 
-DB_TABLE = "air_quality_demo_data.air_quality_raw"
+DB_TABLE = "air_quality_raw"
 
 ENGINE_DATABASE_URL = os.getenv("ENGINE_DATABASE_URL", "").strip()
 ENGINE_STAGING_TABLE = os.getenv("ENGINE_STAGING_TABLE", "engine.staging_historical")
@@ -25,6 +25,7 @@ def _list_params():
         ORDER BY "Parameter Name"
     """
     with app_engine.begin() as conn:
+        conn.execute(text(\'SET search_path TO air_quality_demo_data, public\'))
         return [r["param"] for r in conn.execute(text(sql)).mappings().all()]
 
 def _list_states():
@@ -35,6 +36,7 @@ def _list_states():
         ORDER BY "State Name"
     """
     with app_engine.begin() as conn:
+        conn.execute(text(\'SET search_path TO air_quality_demo_data, public\'))
         return [r["state"] for r in conn.execute(text(sql)).mappings().all()]
 
 def _daily_mean_df(parameter: str, state: str) -> pd.DataFrame:
@@ -46,6 +48,7 @@ def _daily_mean_df(parameter: str, state: str) -> pd.DataFrame:
         ORDER BY DATE("Date Local")
     """
     with app_engine.begin() as conn:
+        conn.execute(text(\'SET search_path TO air_quality_demo_data, public\'))
         rows = conn.execute(text(sql), {"parameter": parameter, "state": state}).mappings().all()
     if not rows:
         raise HTTPException(status_code=404, detail="No rows found for that Parameter/State.")
