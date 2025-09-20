@@ -1,50 +1,168 @@
 
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>TSF: Classical Run</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;margin:0;padding:2rem;background:#0b0b0c;color:#e5e7eb}
-      .card{max-width:760px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.3)}
-      h1{font-size:1.25rem;margin:0 0 1rem 0}
-      label{display:block;margin:.75rem 0 .25rem 0;color:#9ca3af}
-      select,button{width:100%;padding:.75rem 1rem;border-radius:12px;border:1px solid #374151;background:#0f172a;color:#e5e7eb}
-      button{margin-top:1rem;background:#10b981;border-color:#0ea5e9;cursor:pointer}
-      button:hover{background:#059669}
-      .row{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-      .footer{margin-top:1.25rem;color:#6b7280;font-size:.85rem}
-      a{color:#60a5fa}
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>Run Classical Forecast</h1>
-      <form method="post" action="/forms/classical/run">
-        <div class="row">
-          <div>
-            <label for="parameter">Parameter Name</label>
-            <select id="parameter" name="parameter" required>
-              {% for p in params %}
-                <option value="{{p}}">{{p}}</option>
-              {% endfor %}
-            </select>
-          </div>
-          <div>
-            <label for="state">State Name</label>
-            <select id="state" name="state" required>
-              {% for s in states %}
-                <option value="{{s}}">{{s}}</option>
-              {% endfor %}
-            </select>
-          </div>
-        </div>
-        <button type="submit">Generate & Download Final CSV</button>
-      </form>
-      <div class="footer">
-        Need checks? See <a href="/">/</a> · <a href="/health">/health</a> · <a href="/docs">/docs</a>
+<head>
+  <meta charset="utf-8">
+  <title>Classical Forecast — Live Status</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:40px auto;max-width:880px;padding:0 16px;}
+    .row{display:flex;gap:16px;flex-wrap:wrap}
+    label{display:block;font-size:14px;color:#333;margin:8px 0 4px}
+    select,input,button{font-size:16px;padding:10px;border:1px solid #ccc;border-radius:8px}
+    button{background:#111;color:#fff;border:0;cursor:pointer}
+    button[disabled]{opacity:.5;cursor:not-allowed}
+    .card{border:1px solid #eee;border-radius:12px;padding:16px;margin-top:20px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+    .muted{color:#666}
+    .ok{color:#0a7d32}
+    .err{color:#b00020}
+    .bar{height:10px;background:#eee;border-radius:999px;overflow:hidden}
+    .bar>div{height:100%;width:0;background:#2b6cb0;transition:width .3s}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+  </style>
+</head>
+<body>
+  <h1>Run Classical Forecast</h1>
+
+  <form id="f" class="card">
+    <div class="row">
+      <div style="flex:1 1 280px">
+        <label>Parameter Name</label>
+        <select id="param" name="parameter" required>
+          {% for p in params %}<option value="{{p}}">{{p}}</option>{% endfor %}
+        </select>
+      </div>
+      <div style="flex:1 1 280px">
+        <label>State Name</label>
+        <select id="state" name="state" required>
+          {% for s in states %}<option value="{{s}}">{{s}}</option>{% endfor %}
+        </select>
       </div>
     </div>
-  </body>
+    <div class="row">
+      <button id="runBtn" type="submit">Start Forecast</button>
+      <button id="cancelBtn" type="button" disabled>Cancel</button>
+    </div>
+    <p class="muted">This starts a background job and shows live status. When ready, the CSV downloads automatically.</p>
+  </form>
+
+  <div id="statusCard" class="card" style="display:none">
+    <div class="row" style="align-items:center;justify-content:space-between">
+      <div>
+        <div class="muted">Job ID</div>
+        <div id="jobId" class="mono">—</div>
+      </div>
+      <div style="min-width:160px">
+        <div class="bar"><div id="progFill"></div></div>
+        <div id="progText" class="muted" style="text-align:right;margin-top:6px">0%</div>
+      </div>
+    </div>
+    <div style="margin-top:10px">
+      <div class="muted">Status</div>
+      <div id="statusText" class="mono">—</div>
+    </div>
+    <div id="errorText" class="err" style="display:none;margin-top:10px"></div>
+    <div id="downloadLink" style="display:none;margin-top:12px">
+      <a id="dl" class="ok" href="#" download>Download CSV</a>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const form = document.getElementById('f');
+  const runBtn = document.getElementById('runBtn');
+  const cancelBtn = document.getElementById('cancelBtn');
+  const statusCard = document.getElementById('statusCard');
+  const jobIdEl = document.getElementById('jobId');
+  const statusText = document.getElementById('statusText');
+  const errorText = document.getElementById('errorText');
+  const progFill = document.getElementById('progFill');
+  const progText = document.getElementById('progText');
+  const dlWrap = document.getElementById('downloadLink');
+  const dl = document.getElementById('dl');
+
+  let timer = null;
+  let currentJob = null;
+
+  function setProgress(pct){
+    const v = Math.max(0, Math.min(100, Math.round(pct||0)));
+    progFill.style.width = v + '%';
+    progText.textContent = v + '%';
+  }
+
+  function setStatus(text){ statusText.textContent = text || '—'; }
+
+  function poll(){
+    if(!currentJob) return;
+    fetch(`/classical/status?job_id=${encodeURIComponent(currentJob)}`)
+      .then(r => r.json())
+      .then(j => {
+        const state = j.state || 'unknown';
+        setStatus(state + (j.message ? (' — ' + j.message) : ''));
+        if('progress' in j){ setProgress(j.progress); }
+        if(state === 'ready'){
+          clearInterval(timer); timer = null;
+          runBtn.disabled = false; cancelBtn.disabled = true;
+          dl.href = `/classical/download?job_id=${encodeURIComponent(currentJob)}`;
+          dlWrap.style.display = 'block';
+          dl.click(); // auto-download
+        } else if(state === 'error' || state === 'failed'){
+          clearInterval(timer); timer = null;
+          runBtn.disabled = false; cancelBtn.disabled = true;
+          errorText.style.display = 'block';
+          errorText.textContent = j.message || 'Job failed';
+        }
+      })
+      .catch(e => {
+        // keep polling through transient issues
+      });
+  }
+
+  cancelBtn.addEventListener('click', function(){
+    if(timer){ clearInterval(timer); timer = null; }
+    runBtn.disabled = false; cancelBtn.disabled = true;
+    setStatus('Canceled locally (job still running on server)');
+  });
+
+  form.addEventListener('submit', function(ev){
+    ev.preventDefault();
+    errorText.style.display = 'none';
+    dlWrap.style.display = 'none';
+    setProgress(0);
+    setStatus('queued');
+    statusCard.style.display = 'block';
+    runBtn.disabled = true;
+    cancelBtn.disabled = true;
+
+    const payload = {
+      target_value: document.getElementById('param').value,
+      state_name: document.getElementById('state').value,
+      agg: 'mean',
+      ftype: 'F'
+    };
+    fetch('/classical/start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    })
+    .then(r => { if(!r.ok) throw new Error('Failed to start'); return r.json(); })
+    .then(j => {
+      currentJob = j.job_id;
+      jobIdEl.textContent = currentJob;
+      cancelBtn.disabled = false;
+      setProgress(5);
+      setStatus('queued');
+      if(timer) clearInterval(timer);
+      timer = setInterval(poll, 1000);
+    })
+    .catch(err => {
+      runBtn.disabled = false;
+      setStatus('start failed');
+      errorText.style.display = 'block';
+      errorText.textContent = err.message || String(err);
+    });
+  });
+})();
+</script>
+</body>
 </html>
