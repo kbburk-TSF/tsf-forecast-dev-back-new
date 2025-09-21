@@ -1,33 +1,28 @@
 # backend/routes/forms_upload_historical.py
-# Upload CSV -> <ENGINE_DB_SCHEMA>.staging_historical using the app's existing SQLAlchemy engine.
-# No new env vars. Reuses backend.database.engine so SSL/DSN match your working /health.
+# Upload CSV -> engine.staging_historical using the app's existing SQLAlchemy engine.
+# SCHEMA IS FIXED TO 'engine' per user directive (ignore ENGINE_DB_SCHEMA).
 
-
-import os, io, uuid, asyncio, csv
+import io, uuid, asyncio, csv
 from typing import Dict, List, Tuple
 
 from fastapi import APIRouter, UploadFile, File
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from sqlalchemy import text
-from backend.database import engine  # <-- reuse existing engine (same as /health)
+from backend.database import engine  # reuse existing engine
 
+SCHEMA = "engine"  # <-- fixed schema
+TABLE = f"{SCHEMA}.staging_historical"
 
 router = APIRouter()
 PROGRESS: Dict[str, Dict] = {}
-
-
-def _schema() -> str:
-    # match your environment var name used across the backend
-    return os.environ.get("ENGINE_DB_SCHEMA", "engine")
-
 
 @router.get("/forms/upload-historical", response_class=HTMLResponse)
 async def upload_form():
     return HTMLResponse((
         "<!doctype html><meta charset='utf-8'>"
         "<title>Upload Historical CSV</title>"
-        "<h2>Upload to staging_historical</h2>"
+        "<h2>Upload to engine.staging_historical</h2>"
         "<form id=f method=post enctype=multipart/form-data action='/forms/upload-historical'>"
         "<input type=file name=file accept='.csv' required> <button>Upload</button></form>"
         "<pre id=out></pre>"
@@ -45,7 +40,6 @@ async def upload_form():
         "</script>"
     ))
 
-
 @router.post("/forms/upload-historical")
 async def upload(file: UploadFile = File(...)):
     job_id = str(uuid.uuid4())
@@ -53,7 +47,6 @@ async def upload(file: UploadFile = File(...)):
     data = await file.read()
     asyncio.create_task(_ingest(job_id, data))
     return {"job_id": job_id}
-
 
 async def _ingest(job_id: str, data: bytes):
     try:
@@ -63,46 +56,35 @@ async def _ingest(job_id: str, data: bytes):
         header = next(reader, None)
         if not header:
             raise ValueError("Empty file")
-        # Expect header columns exactly:
-        # parameter, state, date, value
-        total = 0
-        # Count lines cheaply (remaining lines in buffer)
-        for _ in reader:
-            total += 1
+        # quick count
+        total = sum(1 for _ in reader)
         PROGRESS[job_id]["total"] = total
 
-        # Rewind to first data row
+        # rewind
         buf.seek(0)
         reader = csv.reader(buf)
         next(reader, None)
 
         PROGRESS[job_id].update(state="inserting", inserted=0)
 
-        target = f"{_schema()}.staging_historical"
-        insert_sql = text(f"INSERT INTO {target} (parameter, state, date, value) VALUES (:p, :s, :d, :v)")
-
+        insert_sql = text(f"INSERT INTO {TABLE} (parameter, state, date, value) VALUES (:p, :s, :d, :v)")
         BATCH = 1000
         batch: List[Tuple[str,str,str,str]] = []
         inserted = 0
 
         with engine.begin() as conn:
-            # optional: set search_path to ensure schema resolves even if fully qualified
-            conn.exec_driver_sql(f"SET search_path TO {_schema()}")
-            buf.seek(0)
-            reader = csv.reader(buf)
-            next(reader, None)
+            conn.exec_driver_sql(f"SET search_path TO {SCHEMA}")
             for row in reader:
                 if not row:
                     continue
-                # Expect 4 columns; pad/truncate if needed
-                row = (row + ["", "", "", ""])[:4]
-                batch.append((row[0], row[1], row[2], row[3] if row[3] != "" else None))
+                row = (row + [None, None, None, None])[:4]
+                p, s, d, v = row[0], row[1], row[2], row[3] if (row[3] not in ("", None)) else None
+                batch.append((p, s, d, v))
                 if len(batch) >= BATCH:
                     conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
                     inserted += len(batch)
                     PROGRESS[job_id]["inserted"] = inserted
                     batch.clear()
-
             if batch:
                 conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
                 inserted += len(batch)
@@ -111,7 +93,6 @@ async def _ingest(job_id: str, data: bytes):
         PROGRESS[job_id].update(state="done")
     except Exception as e:
         PROGRESS[job_id].update(state="error", error=str(e))
-
 
 @router.get("/forms/upload-historical/stream/{job_id}")
 async def stream(job_id: str):
