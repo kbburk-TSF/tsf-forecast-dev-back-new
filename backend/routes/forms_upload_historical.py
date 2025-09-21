@@ -1,33 +1,26 @@
 # backend/routes/forms_upload_historical.py
-# Upload CSV into <ENGINE_DB_SCHEMA>.staging_historical with live SSE progress.
-# Relies on existing env vars:
-#   ENGINE_DATABASE_URL (Postgres DSN)
-#   ENGINE_DB_SCHEMA    (schema name; default "engine")
-#
-# Endpoints:
-#   GET  /forms/upload-historical
-#   POST /forms/upload-historical
-#   GET  /forms/upload-historical/stream/{job_id}
+# Upload CSV -> <ENGINE_DB_SCHEMA>.staging_historical using the app's existing SQLAlchemy engine.
+# No new env vars. Reuses backend.database.engine so SSL/DSN match your working /health.
 
-import os, io, uuid, asyncio
-from typing import Dict
+
+import os, io, uuid, asyncio, csv
+from typing import Dict, List, Tuple
 
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-import psycopg
-from psycopg.rows import tuple_row
+
+from sqlalchemy import text
+from backend.database import engine  # <-- reuse existing engine (same as /health)
+
 
 router = APIRouter()
 PROGRESS: Dict[str, Dict] = {}
 
-def _engine_dsn() -> str:
-    dsn = os.environ.get("ENGINE_DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("ENGINE_DATABASE_URL not set")
-    return dsn
 
-def _engine_schema() -> str:
+def _schema() -> str:
+    # match your environment var name used across the backend
     return os.environ.get("ENGINE_DB_SCHEMA", "engine")
+
 
 @router.get("/forms/upload-historical", response_class=HTMLResponse)
 async def upload_form():
@@ -52,6 +45,7 @@ async def upload_form():
         "</script>"
     ))
 
+
 @router.post("/forms/upload-historical")
 async def upload(file: UploadFile = File(...)):
     job_id = str(uuid.uuid4())
@@ -60,51 +54,64 @@ async def upload(file: UploadFile = File(...)):
     asyncio.create_task(_ingest(job_id, data))
     return {"job_id": job_id}
 
+
 async def _ingest(job_id: str, data: bytes):
     try:
         PROGRESS[job_id].update(state="reading")
-        total_lines = data.count(b"\n")
-        PROGRESS[job_id]["total"] = max(total_lines - 1, 0)
+        buf = io.StringIO(data.decode("utf-8", errors="ignore"))
+        reader = csv.reader(buf)
+        header = next(reader, None)
+        if not header:
+            raise ValueError("Empty file")
+        # Expect header columns exactly:
+        # parameter, state, date, value
+        total = 0
+        # Count lines cheaply (remaining lines in buffer)
+        for _ in reader:
+            total += 1
+        PROGRESS[job_id]["total"] = total
 
-        dsn = _engine_dsn()
-        schema = _engine_schema()
-        target = f"{schema}.staging_historical"
+        # Rewind to first data row
+        buf.seek(0)
+        reader = csv.reader(buf)
+        next(reader, None)
 
         PROGRESS[job_id].update(state="inserting", inserted=0)
 
-        buf = io.StringIO(data.decode("utf-8", errors="ignore"))
+        target = f"{_schema()}.staging_historical"
+        insert_sql = text(f"INSERT INTO {target} (parameter, state, date, value) VALUES (:p, :s, :d, :v)")
 
-        async with await psycopg.AsyncConnection.connect(dsn) as conn:
-            async with conn.cursor(row_factory=tuple_row) as cur:
-                header = buf.readline()
-                if not header:
-                    raise ValueError("Empty file")
-                await cur.execute("SET search_path TO " + schema)
-                await cur.execute(f"COPY {target} (parameter,state,date,value) FROM STDIN WITH (FORMAT csv)")
+        BATCH = 1000
+        batch: List[Tuple[str,str,str,str]] = []
+        inserted = 0
 
-                inserted = 0
-                CHUNK = 5000
-                cache = []
-
-                for line in buf:
-                    cache.append(line)
-                    if len(cache) >= CHUNK:
-                        await cur.copy_data(''.join(cache))
-                        inserted += len(cache)
-                        PROGRESS[job_id]["inserted"] = inserted
-                        cache.clear()
-
-                if cache:
-                    await cur.copy_data(''.join(cache))
-                    inserted += len(cache)
+        with engine.begin() as conn:
+            # optional: set search_path to ensure schema resolves even if fully qualified
+            conn.exec_driver_sql(f"SET search_path TO {_schema()}")
+            buf.seek(0)
+            reader = csv.reader(buf)
+            next(reader, None)
+            for row in reader:
+                if not row:
+                    continue
+                # Expect 4 columns; pad/truncate if needed
+                row = (row + ["", "", "", ""])[:4]
+                batch.append((row[0], row[1], row[2], row[3] if row[3] != "" else None))
+                if len(batch) >= BATCH:
+                    conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
+                    inserted += len(batch)
                     PROGRESS[job_id]["inserted"] = inserted
+                    batch.clear()
 
-                await cur.copy_end()
-            await conn.commit()
+            if batch:
+                conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
+                inserted += len(batch)
+                PROGRESS[job_id]["inserted"] = inserted
 
         PROGRESS[job_id].update(state="done")
     except Exception as e:
         PROGRESS[job_id].update(state="error", error=str(e))
+
 
 @router.get("/forms/upload-historical/stream/{job_id}")
 async def stream(job_id: str):
