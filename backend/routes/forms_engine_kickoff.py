@@ -86,3 +86,34 @@ def engine_kickoff_status(run_id: str = Query(...)) -> JSONResponse:
         }))
     except Exception as e:
         return JSONResponse(content=jsonable_encoder({"ok": False, "error": str(e)}), status_code=500)
+
+@router.get("/forms/engine-kickoff/stream", tags=["forms"])
+def engine_kickoff_stream(run_id: str):
+    """Server-Sent Events stream for real-time updates.
+    Subscribes to NOTIFY channel 'engine_status' and pushes events for run_id.
+    """
+    import select, json, time
+    def event_gen():
+        try:
+            conn = _connect()
+            conn.set_session(autocommit=True)
+            cur = conn.cursor()
+            cur.execute("LISTEN engine_status;")
+            yield "data: {\"ok\": true, \"event\": \"connected\"}\n\n"
+            while True:
+                if select.select([conn], [], [], 25) == ([], [], []):
+                    yield "data: {\"ok\": true, \"event\": \"heartbeat\"}\n\n"
+                    continue
+                conn.poll()
+                while conn.notifies:
+                    notify = conn.notifies.pop(0)
+                    try:
+                        payload = json.loads(notify.payload)
+                        if str(payload.get("run_id")) == str(run_id):
+                            yield "data: " + json.dumps(payload) + "\\n\\n"
+                    except Exception:
+                        pass
+        except Exception as e:
+            yield "data: {\"ok\": false, \"error\": \"" + str(e).replace('"','\\\"') + "\"}\n\n"
+            time.sleep(0.5)
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
