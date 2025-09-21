@@ -1,0 +1,92 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Trigger Forecast Engine</title>
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;margin:24px;max-width:900px}
+ fieldset{border:1px solid #ddd;padding:16px;border-radius:8px}
+ label{display:block;margin:8px 0 4px}
+ button{padding:8px 14px;cursor:pointer}
+ progress{width:100%;height:16px}
+ pre{background:#f7f7f7;padding:12px;border-radius:6px;white-space:pre-wrap}
+ code{font-family:ui-monospace,Menlo,Consolas,monospace}
+ .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+ .muted{color:#666}
+</style>
+
+<h2>Trigger Forecast Engine</h2>
+<form id="kickForm" method="post" action="/forms/engine-kickoff/start">
+  <fieldset>
+    <legend>Select Forecast</legend>
+    <label for="forecast_id">Forecast</label>
+    <select id="forecast_id" name="forecast_id" required>
+      <!--__OPTIONS__-->
+    </select>
+    <div class="row" style="margin-top:12px">
+      <button type="submit">Start</button>
+      <span id="hint" class="muted">Starts a full six-phase run for the selected forecast.</span>
+    </div>
+  </fieldset>
+</form>
+
+<div id="status" style="margin-top:20px;display:none">
+  <h3>Status</h3>
+  <progress id="bar" value="0" max="100"></progress>
+  <div id="pct" class="muted">0%</div>
+  <pre id="log"></pre>
+</div>
+
+<script>
+const form = document.getElementById('kickForm');
+const statusBox = document.getElementById('status');
+const logEl = document.getElementById('log');
+const bar = document.getElementById('bar');
+const pct = document.getElementById('pct');
+let polling = null;
+let currentRunId = null;
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const data = new FormData(form);
+  const r = await fetch(form.action, { method: 'POST', body: data });
+  const j = await r.json();
+  if(!j.ok){ logEl.textContent = 'Error: ' + (j.error||'unknown'); statusBox.style.display='block'; return; }
+  currentRunId = j.run_id;
+  logEl.textContent = 'Run ' + currentRunId + ' started for forecast ' + j.forecast_id + '...\n';
+  statusBox.style.display='block';
+  bar.value = 0; pct.textContent = '0%';
+  if(polling) clearInterval(polling);
+  polling = setInterval(pollStatus, 1500);
+});
+
+async function pollStatus(){
+  if(!currentRunId){ return; }
+  try{
+    const r = await fetch('/forms/engine-kickoff/status?run_id=' + encodeURIComponent(currentRunId));
+    const j = await r.json();
+    if(!j.ok){ logEl.textContent += '\nStatus error: ' + (j.error||'unknown'); clearInterval(polling); return; }
+    bar.value = j.progress_percent;
+    pct.textContent = j.progress_percent + '%';
+
+    const lines = [];
+    if(j.run){
+      lines.push('run_status: ' + j.run.status + '  started: ' + (j.run.started_at||'') + '  finished: ' + (j.run.finished_at||''));
+      if(j.run.overall_error){ lines.push('overall_error: ' + j.run.overall_error); }
+    }
+    if(Array.isArray(j.phases)){
+      for(const p of j.phases){
+        lines.push((p.phase||'').padEnd(7) + '  ' + (p.status||'').padEnd(7) + '  ' +
+                   (p.started_at||'').toString().padEnd(22) + '  ' +
+                   (p.finished_at||''));
+        if(p.message){ lines.push('  msg: ' + p.message); }
+      }
+    }
+    logEl.textContent = lines.join('\n');
+    if(j.run && (j.run.status === 'done' || j.run.status === 'error')){
+      clearInterval(polling);
+    }
+  }catch(err){
+    logEl.textContent += '\nStatus fetch failed: ' + err;
+    clearInterval(polling);
+  }
+}
+</script>

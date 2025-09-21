@@ -40,6 +40,9 @@ forms_mounted = safe_include("backend.routes.forms_classical_flow", "router") or
 # NEW: mount upload-historical routes (uses ENGINE_DATABASE_URL / ENGINE_DB_SCHEMA)
 safe_include("backend.routes.forms_upload_historical", "router")
 
+# NEW: mount engine kickoff routes
+safe_include("backend.routes.forms_engine_kickoff", "router")
+
 @app.get("/", tags=["root"])
 def root():
     return {"ok": True, "service": "tsf-backend", "forms": {"classical": "/forms/classical", "upload": "/forms/upload-historical"}, "docs": "/docs", "health": "/health"}
