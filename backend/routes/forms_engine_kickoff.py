@@ -3,6 +3,7 @@ import os
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Query, Form
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.encoders import jsonable_encoder
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -47,9 +48,9 @@ def engine_kickoff_start(forecast_id: str = Form(...)) -> JSONResponse:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT engine.manual_kickoff_by_id(%s::uuid)", (forecast_id,))
             run_id = cur.fetchone()[0]
-        return JSONResponse({"ok": True, "run_id": run_id, "forecast_id": forecast_id})
+        return JSONResponse(content=jsonable_encoder({"ok": True, "run_id": run_id, "forecast_id": forecast_id}))
     except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return JSONResponse(content=jsonable_encoder({"ok": False, "error": str(e)}), status_code=500)
 
 @router.get("/forms/engine-kickoff/status", response_class=JSONResponse, tags=["forms"])
 def engine_kickoff_status(run_id: str = Query(...)) -> JSONResponse:
@@ -77,11 +78,11 @@ def engine_kickoff_status(run_id: str = Query(...)) -> JSONResponse:
         done = sum(1 for p in phases if p["status"] == "done")
         progress = int((done / total) * 100)
 
-        return JSONResponse({
+        return JSONResponse(content=jsonable_encoder({
             "ok": True,
             "run": run_header,
             "phases": phases,
             "progress_percent": progress
-        })
+        }))
     except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return JSONResponse(content=jsonable_encoder({"ok": False, "error": str(e)}), status_code=500)
