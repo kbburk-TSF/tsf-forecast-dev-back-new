@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Upload Historical CSV</title>
+<h2>Upload to engine.staging_historical</h2>
+<form id="f" method="post" enctype="multipart/form-data" action="/forms/upload-historical">
+  <input type="file" name="file" accept=".csv" required>
+  <button>Upload</button>
+</form>
+<pre id="out"></pre>
+<script>
+  const out=document.getElementById('out');
+  document.getElementById('f').addEventListener('submit',async(e)=>{
+    e.preventDefault();
+    out.textContent='Uploading...';
+    const r=await fetch(e.target.action,{method:'POST',body:new FormData(e.target)});
+    if(!r.ok){ out.textContent='HTTP '+r.status; return; }
+    const {job_id}=await r.json();
+    out.textContent='Job '+job_id+' started. Monitoring...';
+    const es=new EventSource('/forms/upload-historical/stream/'+job_id);
+    es.onmessage=(ev)=>{ out.textContent=ev.data; if(ev.data.includes('state=done')||ev.data.includes('state=error')) es.close(); };
+    es.onerror=()=>{ es.close(); };
+  });
+</script>
