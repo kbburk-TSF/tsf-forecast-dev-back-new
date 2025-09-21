@@ -7,6 +7,7 @@ from backend.database import engine as app_engine
 import pandas as pd
 import os
 from datetime import datetime
+from uuid import uuid4
 
 router = APIRouter(prefix="/forms", tags=["forms"])
 templates = Jinja2Templates(directory="backend/templates")
@@ -67,24 +68,23 @@ def classical_form(request: Request):
 
 @router.post("/classical/run")
 def classical_run(parameter: str = Form(...), state: str = Form(...)):
-    # Aggregate daily mean series
+    # 1) Build aggregated series
     df = _daily_mean_df(parameter, state)[["date","value"]]
 
-    # Identify file
-    forecast_id = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-    today = datetime.utcnow().strftime("%Y%m%d")
+    # 2) Identify
+    forecast_id = str(uuid4())
     safe_param = _safe_name(parameter)
     safe_state = _safe_name(state)
-    forecast_name = f"{safe_param}_{safe_state}_{today}.csv"
+    forecast_name = f"{safe_param}_{safe_state}"  # no date, no extension
 
-    # Assemble final CSV: forecast_id, forecast_name, date, value
+    # 3) Assemble final CSV: forecast_id, forecast_name, date, value
     final_df = df.copy()
     final_df.insert(0, "forecast_name", forecast_name)
     final_df.insert(0, "forecast_id", forecast_id)
 
-    # Save and return
+    # 4) Save and return
     jobs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "_jobs"))
     os.makedirs(jobs_dir, exist_ok=True)
-    out_path = os.path.abspath(os.path.join(jobs_dir, forecast_name))
+    out_path = os.path.abspath(os.path.join(jobs_dir, f"{forecast_name}.csv"))
     final_df.to_csv(out_path, index=False)
-    return FileResponse(out_path, media_type="text/csv", filename=forecast_name)
+    return FileResponse(out_path, media_type="text/csv", filename=os.path.basename(out_path))
