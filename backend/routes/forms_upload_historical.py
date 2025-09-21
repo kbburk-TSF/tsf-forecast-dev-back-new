@@ -1,7 +1,5 @@
 # backend/routes/forms_upload_historical.py
-# CSV upload -> air_quality_engine_research.engine.staging_historical
-# Connects explicitly to ENGINE_DATABASE_URL (NOT DATABASE_URL).
-# Uses fully qualified table name (engine.staging_historical). No search_path tweaks.
+# Upload CSV -> air_quality_engine_research.engine.staging_historical using ENGINE_DATABASE_URL
 
 import os, io, uuid, asyncio, csv
 from typing import Dict, List, Tuple
@@ -10,21 +8,18 @@ from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
-# ---- DB selection (explicit) ----
 ENGINE_DB_URL = os.getenv("ENGINE_DATABASE_URL")
 if not ENGINE_DB_URL:
-    raise RuntimeError("ENGINE_DATABASE_URL is not set for the backend process.")
+    raise RuntimeError("ENGINE_DATABASE_URL is not set.")
 
-db_engine = create_engine(ENGINE_DB_URL, pool_pre_ping=True, future=True)
-
-TARGET_FQN = "engine.staging_historical"  # schema.table
+engine = create_engine(ENGINE_DB_URL, pool_pre_ping=True, future=True)
+TARGET = "engine.staging_historical"
 
 router = APIRouter()
 PROGRESS: Dict[str, Dict] = {}
 
 @router.get("/forms/upload-historical", response_class=HTMLResponse)
 async def upload_form():
-    # show target in the page header so it's obvious which DB/schema is targeted
     return HTMLResponse(
         "<!doctype html><meta charset='utf-8'>"
         "<title>Upload Historical CSV</title>"
@@ -66,49 +61,36 @@ async def _ingest(job_id: str, data: bytes):
         total = sum(1 for _ in reader)
         PROGRESS[job_id]["total"] = total
 
-        # rewind to first data row
-        buf.seek(0)
-        reader = csv.reader(buf)
-        next(reader, None)
+        buf.seek(0); reader = csv.reader(buf); next(reader, None)
 
-        # Verify table exists in the intended DB+schema
-        with db_engine.begin() as conn:
+        with engine.begin() as conn:
             exists = conn.execute(text(
                 "select 1 from information_schema.tables "
-                "where table_catalog = current_database() "
-                "  and table_schema = 'engine' "
-                "  and table_name = 'staging_historical'"
+                "where table_schema='engine' and table_name='staging_historical'"
             )).first()
             if not exists:
-                raise RuntimeError("engine.staging_historical not found in this database (connected via ENGINE_DATABASE_URL).")
+                raise RuntimeError("engine.staging_historical not found in ENGINE_DATABASE_URL DB.")
 
         PROGRESS[job_id].update(state="inserting", inserted=0)
 
-        insert_sql = text(
-            f"INSERT INTO {TARGET_FQN} (parameter, state, date, value) VALUES (:p, :s, :d, :v)"
-        )
+        insert_sql = text(f"INSERT INTO {TARGET} (parameter, state, date, value) VALUES (:p,:s,:d,:v)")
 
         BATCH = 1000
         batch: List[Tuple[str,str,str,str]] = []
         inserted = 0
 
-        with db_engine.begin() as conn:
+        with engine.begin() as conn:
             for row in reader:
-                if not row:
-                    continue
+                if not row: continue
                 row = (row + [None, None, None, None])[:4]
-                p, s, d, v = row[0], row[1], row[2], row[3] if (row[3] not in ('', None)) else None
+                p, s, d, v = row[0], row[1], row[2], (row[3] if row[3] not in ('', None) else None)
                 batch.append((p, s, d, v))
                 if len(batch) >= BATCH:
                     conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
-                    inserted += len(batch)
-                    PROGRESS[job_id]["inserted"] = inserted
-                    batch.clear()
-
+                    inserted += len(batch); PROGRESS[job_id]["inserted"] = inserted; batch.clear()
             if batch:
                 conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
-                inserted += len(batch)
-                PROGRESS[job_id]["inserted"] = inserted
+                inserted += len(batch); PROGRESS[job_id]["inserted"] = inserted
 
         PROGRESS[job_id].update(state="done")
     except Exception as e:
@@ -121,13 +103,9 @@ async def stream(job_id: str):
         while True:
             s = PROGRESS.get(job_id)
             if not s:
-                yield "data: job not found\n\n"
-                return
+                yield "data: job not found\n\n"; return
             msg = f"state={s['state']} inserted={s['inserted']} total={s['total']} error={s['error']}"
-            if msg != last:
-                yield f"data: {msg}\n\n"
-                last = msg
-            if s["state"] in ("done","error"):
-                return
+            if msg != last: yield f"data: {msg}\n\n"; last = msg
+            if s["state"] in ("done","error"): return
             await asyncio.sleep(0.5)
     return StreamingResponse(gen(), media_type="text/event-stream")
