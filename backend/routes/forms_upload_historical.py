@@ -1,5 +1,5 @@
 # backend/routes/forms_upload_historical.py
-# Forced-direct + aggressive keepalive pinger to prevent Neon control-plane cold starts.
+# Direct-only + fixed transaction handling (no nested/auto-begin conflicts).
 import os, io, uuid, asyncio, csv, time, threading
 from typing import Dict, List, Tuple
 from fastapi import APIRouter, UploadFile, File
@@ -9,13 +9,12 @@ from sqlalchemy.exc import SQLAlchemyError, OperationalError
 
 router = APIRouter()
 
-# ---- Direct-only connection (no pooler) ----
 ENGINE_DB_URL = (os.getenv("ENGINE_DATABASE_URL_DIRECT") or "").strip()
 if not ENGINE_DB_URL:
     raise RuntimeError("ENGINE_DATABASE_URL_DIRECT must be set to the Neon DIRECT URL")
 
 CONNECT_TIMEOUT = int(os.getenv("NEON_CONNECT_TIMEOUT", "10"))
-KEEPALIVE_SECS = int(os.getenv("NEON_KEEPALIVE_SECONDS", "25"))  # ping interval
+KEEPALIVE_SECS = int(os.getenv("NEON_KEEPALIVE_SECONDS", "25"))
 RETRY_ATTEMPTS  = int(os.getenv("NEON_CONNECT_RETRIES", "10"))
 RETRY_SLEEP     = float(os.getenv("NEON_CONNECT_RETRY_SLEEP", "3"))
 
@@ -33,13 +32,21 @@ PROGRESS: Dict[str, Dict] = {}
 PING_STATE = {"running": False, "last_ok": None, "errors": 0}
 
 def _connect_with_retry(max_attempts: int = RETRY_ATTEMPTS, sleep_secs: float = RETRY_SLEEP):
+    """Ensure the DB is reachable. Opens and closes a connection; returns attempts used."""
     attempt = 0
     last_err = None
     while attempt < max_attempts:
         try:
             conn = _engine.connect()
+            # ping; rollback if a tx was implicitly opened
             conn.exec_driver_sql("select 1")
-            return conn, attempt + 1
+            try:
+                if conn.get_transaction() is not None:
+                    conn.rollback()
+            except Exception:
+                pass
+            conn.close()
+            return attempt + 1
         except OperationalError as e:
             last_err = e
             time.sleep(sleep_secs)
@@ -51,24 +58,21 @@ def _keepalive_loop():
     PING_STATE["running"] = True
     while True:
         try:
-            conn, _ = _connect_with_retry()
-            with conn.begin():
-                conn.exec_driver_sql("select 1")
-            conn.close()
+            used = _connect_with_retry()
             PING_STATE["last_ok"] = time.time()
         except Exception:
             PING_STATE["errors"] += 1
         time.sleep(KEEPALIVE_SECS)
 
-# Start the daemon pinger on import so it's active without main.py edits
 _thread = threading.Thread(target=_keepalive_loop, daemon=True)
 _thread.start()
 
 @router.get("/forms/debug/engine-db")
 def debug_engine_db():
     try:
-        conn, used_attempts = _connect_with_retry()
-        with conn.begin():
+        attempts_used = _connect_with_retry()
+        # Fresh read-only connection for metadata
+        with _engine.connect() as conn:
             db = conn.exec_driver_sql("select current_database()").scalar()
             sp = conn.exec_driver_sql("show search_path").scalar()
             ver = conn.exec_driver_sql("show server_version").scalar()
@@ -76,11 +80,16 @@ def debug_engine_db():
                 "select exists (select 1 from information_schema.tables "
                 " where table_schema='engine' and table_name='staging_historical')"
             ).scalar()
-        conn.close()
+            # rollback any implicit txn
+            try:
+                if conn.get_transaction() is not None:
+                    conn.rollback()
+            except Exception:
+                pass
         return JSONResponse({
             "ok": True,
             "url_in_use": ENGINE_DB_URL,
-            "attempts_used": used_attempts,
+            "attempts_used": attempts_used,
             "current_database": db,
             "search_path": sp,
             "server_version": ver,
@@ -93,11 +102,8 @@ def debug_engine_db():
 @router.get("/forms/warm-engine-db")
 def warm_engine_db():
     try:
-        conn, used_attempts = _connect_with_retry()
-        with conn.begin():
-            conn.exec_driver_sql("select 1")
-        conn.close()
-        return {"ok": True, "attempts_used": used_attempts}
+        attempts_used = _connect_with_retry()
+        return {"ok": True, "attempts_used": attempts_used}
     except SQLAlchemyError as e:
         return JSONResponse({"ok": False, "error": str(e.__cause__ or e)}, status_code=500)
 
@@ -149,14 +155,23 @@ async def _ingest(job_id: str, data: bytes):
 
         buf.seek(0); reader = csv.reader(buf); next(reader, None)
 
-        conn, _ = _connect_with_retry()
-        with conn.begin():
+        # Ensure connectivity (opens/closes its own conn)
+        _ = _connect_with_retry()
+
+        # Existence check on a fresh connection (no explicit begin)
+        with _engine.connect() as conn:
             exists = conn.execute(text(
                 "select 1 from information_schema.tables "
                 "where table_schema='engine' and table_name='staging_historical'"
             )).first()
-            if not exists:
-                raise RuntimeError("engine.staging_historical not found in ENGINE DB")
+            # rollback any implicit txn
+            try:
+                if conn.get_transaction() is not None:
+                    conn.rollback()
+            except Exception:
+                pass
+        if not exists:
+            raise RuntimeError("engine.staging_historical not found in ENGINE DB")
 
         PROGRESS[job_id].update(state="inserting", inserted=0)
 
@@ -166,7 +181,8 @@ async def _ingest(job_id: str, data: bytes):
         batch: List[Tuple[str,str,str,str]] = []
         inserted = 0
 
-        with conn.begin():
+        # NEW: Use a separate transaction scope just for inserts
+        with _engine.begin() as conn:
             for row in reader:
                 if not row: continue
                 row = (row + [None, None, None, None])[:4]
@@ -179,7 +195,6 @@ async def _ingest(job_id: str, data: bytes):
                 conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
                 inserted += len(batch); PROGRESS[job_id]["inserted"] = inserted
 
-        conn.close()
         PROGRESS[job_id].update(state="done")
     except Exception as e:
         PROGRESS[job_id].update(state="error", error=str(e))
