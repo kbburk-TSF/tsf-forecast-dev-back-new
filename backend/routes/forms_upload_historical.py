@@ -1,5 +1,6 @@
 # backend/routes/forms_upload_historical.py
-# Direct-only + fixed transaction handling (no nested/auto-begin conflicts).
+# Direct-only. Target table is configurable via ENGINE_TARGET_FQN (default: engine.staging_historical).
+# Adds /forms/debug/engine-introspect to show schemas and any *staging_historical* tables.
 import os, io, uuid, asyncio, csv, time, threading
 from typing import Dict, List, Tuple
 from fastapi import APIRouter, UploadFile, File
@@ -12,6 +13,8 @@ router = APIRouter()
 ENGINE_DB_URL = (os.getenv("ENGINE_DATABASE_URL_DIRECT") or "").strip()
 if not ENGINE_DB_URL:
     raise RuntimeError("ENGINE_DATABASE_URL_DIRECT must be set to the Neon DIRECT URL")
+
+TARGET_FQN = (os.getenv("ENGINE_TARGET_FQN") or "engine.staging_historical").strip()
 
 CONNECT_TIMEOUT = int(os.getenv("NEON_CONNECT_TIMEOUT", "10"))
 KEEPALIVE_SECS = int(os.getenv("NEON_KEEPALIVE_SECONDS", "25"))
@@ -27,25 +30,16 @@ def _make_engine(url: str):
     )
 
 _engine = _make_engine(ENGINE_DB_URL)
-TARGET_FQN = "engine.staging_historical"
 PROGRESS: Dict[str, Dict] = {}
 PING_STATE = {"running": False, "last_ok": None, "errors": 0}
 
 def _connect_with_retry(max_attempts: int = RETRY_ATTEMPTS, sleep_secs: float = RETRY_SLEEP):
-    """Ensure the DB is reachable. Opens and closes a connection; returns attempts used."""
     attempt = 0
     last_err = None
     while attempt < max_attempts:
         try:
-            conn = _engine.connect()
-            # ping; rollback if a tx was implicitly opened
-            conn.exec_driver_sql("select 1")
-            try:
-                if conn.get_transaction() is not None:
-                    conn.rollback()
-            except Exception:
-                pass
-            conn.close()
+            with _engine.connect() as conn:
+                conn.exec_driver_sql("select 1")
             return attempt + 1
         except OperationalError as e:
             last_err = e
@@ -67,25 +61,23 @@ def _keepalive_loop():
 _thread = threading.Thread(target=_keepalive_loop, daemon=True)
 _thread.start()
 
+def _exists_table(conn, fqn: str) -> bool:
+    if "." in fqn:
+        schema, table = fqn.split(".", 1)
+        q = text("select 1 from information_schema.tables where table_schema=:s and table_name=:t")
+        return conn.execute(q, {"s": schema, "t": table}).first() is not None
+    q = text("select 1 from information_schema.tables where table_name=:t")
+    return conn.execute(q, {"t": fqn}).first() is not None
+
 @router.get("/forms/debug/engine-db")
 def debug_engine_db():
     try:
         attempts_used = _connect_with_retry()
-        # Fresh read-only connection for metadata
         with _engine.connect() as conn:
             db = conn.exec_driver_sql("select current_database()").scalar()
             sp = conn.exec_driver_sql("show search_path").scalar()
             ver = conn.exec_driver_sql("show server_version").scalar()
-            exists = conn.exec_driver_sql(
-                "select exists (select 1 from information_schema.tables "
-                " where table_schema='engine' and table_name='staging_historical')"
-            ).scalar()
-            # rollback any implicit txn
-            try:
-                if conn.get_transaction() is not None:
-                    conn.rollback()
-            except Exception:
-                pass
+            exists = _exists_table(conn, TARGET_FQN)
         return JSONResponse({
             "ok": True,
             "url_in_use": ENGINE_DB_URL,
@@ -93,11 +85,25 @@ def debug_engine_db():
             "current_database": db,
             "search_path": sp,
             "server_version": ver,
-            "engine.staging_historical_exists": bool(exists),
+            "target_fqn": TARGET_FQN,
+            "target_exists": bool(exists),
             "keepalive": {"running": PING_STATE["running"], "last_ok_epoch": PING_STATE["last_ok"], "errors": PING_STATE["errors"]},
         })
     except SQLAlchemyError as e:
         return JSONResponse({"ok": False, "url_in_use": ENGINE_DB_URL, "error": str(e.__cause__ or e)}, status_code=500)
+
+@router.get("/forms/debug/engine-introspect")
+def debug_engine_introspect():
+    try:
+        with _engine.connect() as conn:
+            schemas = [r[0] for r in conn.exec_driver_sql("select schema_name from information_schema.schemata order by 1")]
+            candidates = conn.exec_driver_sql(
+                "select table_schema, table_name from information_schema.tables "
+                "where lower(table_name) like '%staging_historical%' order by 1,2"
+            ).all()
+        return {"ok": True, "schemas": schemas, "staging_historical_candidates": [(r[0], r[1]) for r in candidates]}
+    except SQLAlchemyError as e:
+        return JSONResponse({"ok": False, "error": str(e.__cause__ or e)}, status_code=500)
 
 @router.get("/forms/warm-engine-db")
 def warm_engine_db():
@@ -112,8 +118,9 @@ async def upload_form():
     return HTMLResponse(
         "<!doctype html><meta charset='utf-8'>"
         "<title>Upload Historical CSV</title>"
-        "<h2>Upload to air_quality_engine_research.engine.staging_historical</h2>"
+        f"<h2>Upload to {TARGET_FQN}</h2>"
         "<p><a href='/forms/debug/engine-db' target='_blank'>Check connection</a> · "
+        "<a href='/forms/debug/engine-introspect' target='_blank'>Introspect</a> · "
         "<a href='/forms/warm-engine-db' target='_blank'>Warm DB</a></p>"
         "<form id=f method=post enctype=multipart/form-data action='/forms/upload-historical'>"
         "<input type=file name=file accept='.csv' required> "
@@ -155,33 +162,25 @@ async def _ingest(job_id: str, data: bytes):
 
         buf.seek(0); reader = csv.reader(buf); next(reader, None)
 
-        # Ensure connectivity (opens/closes its own conn)
-        _ = _connect_with_retry()
-
-        # Existence check on a fresh connection (no explicit begin)
+        # Verify target table exists
         with _engine.connect() as conn:
-            exists = conn.execute(text(
-                "select 1 from information_schema.tables "
-                "where table_schema='engine' and table_name='staging_historical'"
-            )).first()
-            # rollback any implicit txn
-            try:
-                if conn.get_transaction() is not None:
-                    conn.rollback()
-            except Exception:
-                pass
-        if not exists:
-            raise RuntimeError("engine.staging_historical not found in ENGINE DB")
+            if not _exists_table(conn, TARGET_FQN):
+                # give a precise error that includes candidates
+                cands = conn.exec_driver_sql(
+                    "select table_schema, table_name from information_schema.tables "
+                    "where lower(table_name) like '%staging_historical%' order by 1,2"
+                ).all()
+                raise RuntimeError(f"Target table '{TARGET_FQN}' not found. Candidates: {[(r[0], r[1]) for r in cands]}")
 
         PROGRESS[job_id].update(state="inserting", inserted=0)
 
-        insert_sql = text("INSERT INTO engine.staging_historical (parameter, state, date, value) VALUES (:p,:s,:d,:v)")
+        # Prepare insert SQL for the target
+        insert_sql = text(f"INSERT INTO {TARGET_FQN} (parameter, state, date, value) VALUES (:p,:s,:d,:v)")
 
         BATCH = 1000
         batch: List[Tuple[str,str,str,str]] = []
         inserted = 0
 
-        # NEW: Use a separate transaction scope just for inserts
         with _engine.begin() as conn:
             for row in reader:
                 if not row: continue
