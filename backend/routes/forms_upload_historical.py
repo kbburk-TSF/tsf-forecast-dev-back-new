@@ -1,4 +1,5 @@
 # backend/routes/forms_upload_historical.py
+# Forced-direct version: requires ENGINE_DATABASE_URL_DIRECT in env.
 import os, io, uuid, asyncio, csv, time
 from typing import Dict, List, Tuple
 from fastapi import APIRouter, UploadFile, File
@@ -8,10 +9,9 @@ from sqlalchemy.exc import SQLAlchemyError, OperationalError
 
 router = APIRouter()
 
-ENGINE_DB_URL_DIRECT = os.getenv("ENGINE_DATABASE_URL_DIRECT", "").strip() or None
-ENGINE_DB_URL = ENGINE_DB_URL_DIRECT or os.getenv("ENGINE_DATABASE_URL")
+ENGINE_DB_URL = os.getenv("ENGINE_DATABASE_URL_DIRECT", "").strip()
 if not ENGINE_DB_URL:
-    raise RuntimeError("ENGINE_DATABASE_URL (or ENGINE_DATABASE_URL_DIRECT) is not set")
+    raise RuntimeError("ENGINE_DATABASE_URL_DIRECT must be set (direct Neon connection string)")
 
 def _make_engine(url: str):
     return create_engine(
@@ -34,13 +34,10 @@ def _connect_with_retry(max_attempts: int = 6, sleep_secs: float = 5.0):
             conn.exec_driver_sql("select 1")
             return conn, attempt + 1
         except OperationalError as e:
-            msg = str(e).lower()
             last_err = e
-            if "control plane request failed" in msg or "timeout" in msg or "connection refused" in msg:
-                time.sleep(sleep_secs)
-                attempt += 1
-                continue
-            raise
+            time.sleep(sleep_secs)
+            attempt += 1
+            continue
     raise last_err
 
 @router.get("/forms/debug/engine-db")
