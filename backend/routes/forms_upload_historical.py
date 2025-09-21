@@ -1,31 +1,53 @@
 # backend/routes/forms_upload_historical.py
-# Drop‑in replacement: keeps existing /forms/upload-historical route,
-# adds /debug/engine-db on the SAME router so it's automatically available
-# wherever this module is already included.
-import os, io, uuid, asyncio, csv
+import os, io, uuid, asyncio, csv, time
 from typing import Dict, List, Tuple
-
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, OperationalError
 
 router = APIRouter()
 
-# Explicitly use the ENGINE (research) DB
-ENGINE_DB_URL = os.getenv("ENGINE_DATABASE_URL")
+ENGINE_DB_URL_DIRECT = os.getenv("ENGINE_DATABASE_URL_DIRECT", "").strip() or None
+ENGINE_DB_URL = ENGINE_DB_URL_DIRECT or os.getenv("ENGINE_DATABASE_URL")
 if not ENGINE_DB_URL:
-    raise RuntimeError("ENGINE_DATABASE_URL is not set")
+    raise RuntimeError("ENGINE_DATABASE_URL (or ENGINE_DATABASE_URL_DIRECT) is not set")
 
-_engine = create_engine(ENGINE_DB_URL, pool_pre_ping=True, future=True)
+def _make_engine(url: str):
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        future=True,
+        connect_args={"connect_timeout": 10},
+    )
+
+_engine = _make_engine(ENGINE_DB_URL)
 TARGET_FQN = "engine.staging_historical"
 PROGRESS: Dict[str, Dict] = {}
 
-@router.get("/debug/engine-db")
+def _connect_with_retry(max_attempts: int = 6, sleep_secs: float = 5.0):
+    attempt = 0
+    last_err = None
+    while attempt < max_attempts:
+        try:
+            conn = _engine.connect()
+            conn.exec_driver_sql("select 1")
+            return conn, attempt + 1
+        except OperationalError as e:
+            msg = str(e).lower()
+            last_err = e
+            if "control plane request failed" in msg or "timeout" in msg or "connection refused" in msg:
+                time.sleep(sleep_secs)
+                attempt += 1
+                continue
+            raise
+    raise last_err
+
+@router.get("/forms/debug/engine-db")
 def debug_engine_db():
-    """Prove connection + table existence against ENGINE_DATABASE_URL."""
     try:
-        with _engine.begin() as conn:
+        conn, used_attempts = _connect_with_retry()
+        with conn.begin():
             db = conn.exec_driver_sql("select current_database()").scalar()
             sp = conn.exec_driver_sql("show search_path").scalar()
             ver = conn.exec_driver_sql("show server_version").scalar()
@@ -33,13 +55,27 @@ def debug_engine_db():
                 "select exists (select 1 from information_schema.tables "
                 " where table_schema='engine' and table_name='staging_historical')"
             ).scalar()
+        conn.close()
         return JSONResponse({
             "ok": True,
+            "url_in_use": ENGINE_DB_URL,
+            "attempts_used": used_attempts,
             "current_database": db,
             "search_path": sp,
             "server_version": ver,
             "engine.staging_historical_exists": bool(exists),
         })
+    except SQLAlchemyError as e:
+        return JSONResponse({"ok": False, "url_in_use": ENGINE_DB_URL, "error": str(e.__cause__ or e)}, status_code=500)
+
+@router.get("/forms/warm-engine-db")
+def warm_engine_db():
+    try:
+        conn, used_attempts = _connect_with_retry()
+        with conn.begin():
+            conn.exec_driver_sql("select 1")
+        conn.close()
+        return {"ok": True, "attempts_used": used_attempts}
     except SQLAlchemyError as e:
         return JSONResponse({"ok": False, "error": str(e.__cause__ or e)}, status_code=500)
 
@@ -49,7 +85,8 @@ async def upload_form():
         "<!doctype html><meta charset='utf-8'>"
         "<title>Upload Historical CSV</title>"
         "<h2>Upload to air_quality_engine_research.engine.staging_historical</h2>"
-        "<p><a href='/debug/engine-db' target='_blank'>Check connection</a></p>"
+        "<p><a href='/forms/debug/engine-db' target='_blank'>Check connection</a> · "
+        "<a href='/forms/warm-engine-db' target='_blank'>Warm DB</a></p>"
         "<form id=f method=post enctype=multipart/form-data action='/forms/upload-historical'>"
         "<input type=file name=file accept='.csv' required> "
         "<button>Upload</button></form>"
@@ -90,24 +127,24 @@ async def _ingest(job_id: str, data: bytes):
 
         buf.seek(0); reader = csv.reader(buf); next(reader, None)
 
-        # verify table on ENGINE DB
-        with _engine.begin() as conn:
+        conn, _ = _connect_with_retry()
+        with conn.begin():
             exists = conn.execute(text(
                 "select 1 from information_schema.tables "
                 "where table_schema='engine' and table_name='staging_historical'"
             )).first()
             if not exists:
-                raise RuntimeError("engine.staging_historical not found in ENGINE_DATABASE_URL DB")
+                raise RuntimeError("engine.staging_historical not found in ENGINE DB")
 
         PROGRESS[job_id].update(state="inserting", inserted=0)
 
-        insert_sql = text(f"INSERT INTO {TARGET_FQN} (parameter, state, date, value) VALUES (:p,:s,:d,:v)")
+        insert_sql = text("INSERT INTO engine.staging_historical (parameter, state, date, value) VALUES (:p,:s,:d,:v)")
 
         BATCH = 1000
         batch: List[Tuple[str,str,str,str]] = []
         inserted = 0
 
-        with _engine.begin() as conn:
+        with conn.begin():
             for row in reader:
                 if not row: continue
                 row = (row + [None, None, None, None])[:4]
@@ -120,6 +157,7 @@ async def _ingest(job_id: str, data: bytes):
                 conn.execute(insert_sql, [{"p":b[0], "s":b[1], "d":b[2], "v":b[3]} for b in batch])
                 inserted += len(batch); PROGRESS[job_id]["inserted"] = inserted
 
+        conn.close()
         PROGRESS[job_id].update(state="done")
     except Exception as e:
         PROGRESS[job_id].update(state="error", error=str(e))
