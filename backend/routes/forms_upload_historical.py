@@ -1,6 +1,6 @@
 # backend/routes/forms_upload_historical.py
-# Forced-direct version: requires ENGINE_DATABASE_URL_DIRECT in env.
-import os, io, uuid, asyncio, csv, time
+# Forced-direct + aggressive keepalive pinger to prevent Neon control-plane cold starts.
+import os, io, uuid, asyncio, csv, time, threading
 from typing import Dict, List, Tuple
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
@@ -9,23 +9,30 @@ from sqlalchemy.exc import SQLAlchemyError, OperationalError
 
 router = APIRouter()
 
-ENGINE_DB_URL = os.getenv("ENGINE_DATABASE_URL_DIRECT", "").strip()
+# ---- Direct-only connection (no pooler) ----
+ENGINE_DB_URL = (os.getenv("ENGINE_DATABASE_URL_DIRECT") or "").strip()
 if not ENGINE_DB_URL:
-    raise RuntimeError("ENGINE_DATABASE_URL_DIRECT must be set (direct Neon connection string)")
+    raise RuntimeError("ENGINE_DATABASE_URL_DIRECT must be set to the Neon DIRECT URL")
+
+CONNECT_TIMEOUT = int(os.getenv("NEON_CONNECT_TIMEOUT", "10"))
+KEEPALIVE_SECS = int(os.getenv("NEON_KEEPALIVE_SECONDS", "25"))  # ping interval
+RETRY_ATTEMPTS  = int(os.getenv("NEON_CONNECT_RETRIES", "10"))
+RETRY_SLEEP     = float(os.getenv("NEON_CONNECT_RETRY_SLEEP", "3"))
 
 def _make_engine(url: str):
     return create_engine(
         url,
         pool_pre_ping=True,
         future=True,
-        connect_args={"connect_timeout": 10},
+        connect_args={"connect_timeout": CONNECT_TIMEOUT},
     )
 
 _engine = _make_engine(ENGINE_DB_URL)
 TARGET_FQN = "engine.staging_historical"
 PROGRESS: Dict[str, Dict] = {}
+PING_STATE = {"running": False, "last_ok": None, "errors": 0}
 
-def _connect_with_retry(max_attempts: int = 6, sleep_secs: float = 5.0):
+def _connect_with_retry(max_attempts: int = RETRY_ATTEMPTS, sleep_secs: float = RETRY_SLEEP):
     attempt = 0
     last_err = None
     while attempt < max_attempts:
@@ -39,6 +46,23 @@ def _connect_with_retry(max_attempts: int = 6, sleep_secs: float = 5.0):
             attempt += 1
             continue
     raise last_err
+
+def _keepalive_loop():
+    PING_STATE["running"] = True
+    while True:
+        try:
+            conn, _ = _connect_with_retry()
+            with conn.begin():
+                conn.exec_driver_sql("select 1")
+            conn.close()
+            PING_STATE["last_ok"] = time.time()
+        except Exception:
+            PING_STATE["errors"] += 1
+        time.sleep(KEEPALIVE_SECS)
+
+# Start the daemon pinger on import so it's active without main.py edits
+_thread = threading.Thread(target=_keepalive_loop, daemon=True)
+_thread.start()
 
 @router.get("/forms/debug/engine-db")
 def debug_engine_db():
@@ -61,6 +85,7 @@ def debug_engine_db():
             "search_path": sp,
             "server_version": ver,
             "engine.staging_historical_exists": bool(exists),
+            "keepalive": {"running": PING_STATE["running"], "last_ok_epoch": PING_STATE["last_ok"], "errors": PING_STATE["errors"]},
         })
     except SQLAlchemyError as e:
         return JSONResponse({"ok": False, "url_in_use": ENGINE_DB_URL, "error": str(e.__cause__ or e)}, status_code=500)
