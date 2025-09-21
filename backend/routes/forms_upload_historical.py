@@ -1,13 +1,13 @@
-# routes/forms_upload_historical.py
-# Plug-in route for uploading a CSV directly into engine.staging_historical (ENGINE_DB_SCHEMA)
-# Uses ENGINE_DATABASE_URL and ENGINE_DB_SCHEMA env vars (as in your Render screenshot).
+# backend/routes/forms_upload_historical.py
+# Upload CSV into <ENGINE_DB_SCHEMA>.staging_historical with live SSE progress.
+# Relies on existing env vars:
+#   ENGINE_DATABASE_URL (Postgres DSN)
+#   ENGINE_DB_SCHEMA    (schema name; default "engine")
 #
 # Endpoints:
-#   GET  /forms/upload-historical          -> simple HTML to prove connectivity
-#   POST /forms/upload-historical          -> accepts CSV, starts ingest, returns {job_id}
-#   GET  /forms/upload-historical/stream/{job_id} -> SSE progress
-#
-# No validation is performed; CSV must match table (parameter,state,date,value) with a header row.
+#   GET  /forms/upload-historical
+#   POST /forms/upload-historical
+#   GET  /forms/upload-historical/stream/{job_id}
 
 import os, io, uuid, asyncio
 from typing import Dict
@@ -27,17 +27,14 @@ def _engine_dsn() -> str:
     return dsn
 
 def _engine_schema() -> str:
-    schema = os.environ.get("ENGINE_DB_SCHEMA", "engine")
-    return schema
+    return os.environ.get("ENGINE_DB_SCHEMA", "engine")
 
 @router.get("/forms/upload-historical", response_class=HTMLResponse)
 async def upload_form():
-    # Renders the template we ship, but as raw HTML to avoid templating dependencies.
-    # If you prefer, drop this HTML into your templates/forms directory and render it there.
     return HTMLResponse((
         "<!doctype html><meta charset='utf-8'>"
         "<title>Upload Historical CSV</title>"
-        "<h2>Upload to engine.staging_historical</h2>"
+        "<h2>Upload to staging_historical</h2>"
         "<form id=f method=post enctype=multipart/form-data action='/forms/upload-historical'>"
         "<input type=file name=file accept='.csv' required> <button>Upload</button></form>"
         "<pre id=out></pre>"
@@ -69,11 +66,11 @@ async def _ingest(job_id: str, data: bytes):
         total_lines = data.count(b"\n")
         PROGRESS[job_id]["total"] = max(total_lines - 1, 0)
 
-        PROGRESS[job_id].update(state="inserting", inserted=0)
-
         dsn = _engine_dsn()
-        target_schema = _engine_schema()
-        target_table = f"{target_schema}.staging_historical"
+        schema = _engine_schema()
+        target = f"{schema}.staging_historical"
+
+        PROGRESS[job_id].update(state="inserting", inserted=0)
 
         buf = io.StringIO(data.decode("utf-8", errors="ignore"))
 
@@ -82,9 +79,8 @@ async def _ingest(job_id: str, data: bytes):
                 header = buf.readline()
                 if not header:
                     raise ValueError("Empty file")
-                # set search_path to ensure schema resolution
-                await cur.execute("SET search_path TO " + target_schema)
-                await cur.execute(f"COPY {target_table} (parameter,state,date,value) FROM STDIN WITH (FORMAT csv)")
+                await cur.execute("SET search_path TO " + schema)
+                await cur.execute(f"COPY {target} (parameter,state,date,value) FROM STDIN WITH (FORMAT csv)")
 
                 inserted = 0
                 CHUNK = 5000

@@ -37,9 +37,12 @@ safe_include("backend.routes.meta", "router")
 safe_include("backend.routes.classical", "router")
 forms_mounted = safe_include("backend.routes.forms_classical_flow", "router") or safe_include("backend.routes.forms_raw", "router")
 
+# NEW: mount upload-historical routes (uses ENGINE_DATABASE_URL / ENGINE_DB_SCHEMA)
+safe_include("backend.routes.forms_upload_historical", "router")
+
 @app.get("/", tags=["root"])
 def root():
-    return {"ok": True, "service": "tsf-backend", "forms": {"classical": "/forms/classical"}, "docs": "/docs", "health": "/health"}
+    return {"ok": True, "service": "tsf-backend", "forms": {"classical": "/forms/classical", "upload": "/forms/upload-historical"}, "docs": "/docs", "health": "/health"}
 
 @app.get("/health", tags=["meta"])
 def health():
