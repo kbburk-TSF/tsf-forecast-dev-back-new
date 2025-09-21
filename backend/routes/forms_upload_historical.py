@@ -1,22 +1,34 @@
 # backend/routes/forms_upload_historical.py
-import io, uuid, asyncio, csv
+# CSV upload -> air_quality_engine_research.engine.staging_historical
+# Connects explicitly to ENGINE_DATABASE_URL (NOT DATABASE_URL).
+# Uses fully qualified table name (engine.staging_historical). No search_path tweaks.
+
+import os, io, uuid, asyncio, csv
 from typing import Dict, List, Tuple
+
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
-from sqlalchemy import text
-from backend.database import engine
+from sqlalchemy import create_engine, text
 
-TARGET = "engine.staging_historical"
+# ---- DB selection (explicit) ----
+ENGINE_DB_URL = os.getenv("ENGINE_DATABASE_URL")
+if not ENGINE_DB_URL:
+    raise RuntimeError("ENGINE_DATABASE_URL is not set for the backend process.")
+
+db_engine = create_engine(ENGINE_DB_URL, pool_pre_ping=True, future=True)
+
+TARGET_FQN = "engine.staging_historical"  # schema.table
 
 router = APIRouter()
 PROGRESS: Dict[str, Dict] = {}
 
 @router.get("/forms/upload-historical", response_class=HTMLResponse)
 async def upload_form():
+    # show target in the page header so it's obvious which DB/schema is targeted
     return HTMLResponse(
         "<!doctype html><meta charset='utf-8'>"
         "<title>Upload Historical CSV</title>"
-        "<h2>Upload to engine.staging_historical</h2>"
+        "<h2>Upload to air_quality_engine_research.engine.staging_historical</h2>"
         "<form id=f method=post enctype=multipart/form-data action='/forms/upload-historical'>"
         "<input type=file name=file accept='.csv' required> <button>Upload</button></form>"
         "<pre id=out></pre>"
@@ -54,30 +66,33 @@ async def _ingest(job_id: str, data: bytes):
         total = sum(1 for _ in reader)
         PROGRESS[job_id]["total"] = total
 
+        # rewind to first data row
         buf.seek(0)
         reader = csv.reader(buf)
         next(reader, None)
 
-        with engine.begin() as conn:
+        # Verify table exists in the intended DB+schema
+        with db_engine.begin() as conn:
             exists = conn.execute(text(
                 "select 1 from information_schema.tables "
-                "where table_schema='engine' and table_name='staging_historical'"
+                "where table_catalog = current_database() "
+                "  and table_schema = 'engine' "
+                "  and table_name = 'staging_historical'"
             )).first()
             if not exists:
-                raise RuntimeError("Table engine.staging_historical not found.")
+                raise RuntimeError("engine.staging_historical not found in this database (connected via ENGINE_DATABASE_URL).")
 
         PROGRESS[job_id].update(state="inserting", inserted=0)
 
         insert_sql = text(
-            f"INSERT INTO {TARGET} (parameter, state, date, value) "
-            "VALUES (:p, :s, :d, :v)"
+            f"INSERT INTO {TARGET_FQN} (parameter, state, date, value) VALUES (:p, :s, :d, :v)"
         )
 
         BATCH = 1000
         batch: List[Tuple[str,str,str,str]] = []
         inserted = 0
 
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             for row in reader:
                 if not row:
                     continue
