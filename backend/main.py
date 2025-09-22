@@ -1,3 +1,6 @@
+# ==============================================================================
+# backend/main.py  (restore routers)  -- 2025-09-22T01:30:32.083016Z
+# ==============================================================================
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os, logging
@@ -25,17 +28,23 @@ def safe_include(module_path: str, attr: str):
         log.error(f"Failed to mount {module_path}.{attr}: {e}")
         return False
 
-# Mount existing known routers (kept generic; your app may mount more elsewhere)
+# Existing uploader (kept)
 safe_include("backend.routes.forms_upload_historical", "router")
+
+# Kickoff form (TSF_ENGINE_APP DSN verbatim)
 safe_include("backend.routes.forms_engine_kickoff", "router")
 
-# NEW: diagnostics router to isolate issues with kickoff
-safe_include("backend.routes.engine_kickoff_diag", "router")
+# Export forecasts CSV (AIR_QUALITY_DEMO DSN verbatim)
+safe_include("backend.routes.forms_export_forecasts", "router")
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "ts": "2025-09-22T01:30:32.083016Z"}
 
 @app.get("/")
 def root():
-    return {"ok": True, "routes": ["/forms/engine-kickoff", "/forms/engine-kickoff/ping", "/forms/engine-kickoff/force"]}
+    return {"ok": True, "routes": [
+        "/forms/upload-historical",
+        "/forms/engine-kickoff",
+        "/forms/export-forecasts"
+    ]}

@@ -64,7 +64,7 @@ form.addEventListener('submit', async (e) => {
   bar.value = 0; pct.textContent = '0%';
   consecutiveErrors = 0;
   if(pollingTimer){ clearTimeout(pollingTimer); }
-  scheduleNextPoll(0);
+  scheduleNextPoll(12000);
   startSSE(currentRunId);
 });
 
@@ -81,12 +81,12 @@ async function pollStatus(){
     if(!j.ok){
       consecutiveErrors++;
       hint.textContent = 'status error (retrying)...';
-      scheduleNextPoll(Math.min(5000, 500 * Math.pow(2, Math.min(consecutiveErrors, 5))));
+      scheduleNextPoll(Math.min(45000, 6000 * Math.pow(2, Math.min(consecutiveErrors, 3))));
       return;
     }
     consecutiveErrors = 0;
     hint.textContent = '';
-    bar.value = j.progress_percent;
+    bar.value = j.progress_percent || 0;
     pct.textContent = (j.progress_percent||0) + '%';
     if(j.phases && Array.isArray(j.phases)){
       const running = j.phases.find(p => p.status === 'running');
@@ -96,12 +96,12 @@ async function pollStatus(){
       const err = j.phases.find(p => p.status === 'error');
       if(err){ logEl.textContent += '\nError in ' + err.phase + ': ' + (err.message||''); }
     }
-    if(j.progress_percent >= 100){ hint.textContent = 'Complete.'; return; }
-    scheduleNextPoll(1500);
+    if((j.run && j.run.status && j.run.status === 'done') || (j.progress_percent >= 100)){ hint.textContent = 'Complete.'; return; }
+    scheduleNextPoll(12000);
   }catch(err){
     consecutiveErrors++;
     hint.textContent = 'network error (retrying)...';
-    scheduleNextPoll(Math.min(5000, 500 * Math.pow(2, Math.min(consecutiveErrors, 5))));
+    scheduleNextPoll(Math.min(45000, 6000 * Math.pow(2, Math.min(consecutiveErrors, 3))));
   }
 }
 

@@ -1,6 +1,5 @@
 # ==============================================================================
-# forms_engine_kickoff.py  (TSF_ENGINE_APP — RAW DSN)
-# Purpose: Use ONLY TSF_ENGINE_APP verbatim as the DSN. No parsing, no fallbacks.
+# backend/routes/forms_engine_kickoff.py  (TSF_ENGINE_APP DSN verbatim)
 # ==============================================================================
 import os, select, json, time
 from fastapi import APIRouter, Query, Form
@@ -18,7 +17,7 @@ def _dsn() -> str:
     return dsn
 
 def _connect():
-    # Use the DSN exactly as provided; add a short timeout and require TLS.
+    # Use the DSN exactly as provided; enforce TLS and a short timeout.
     return psycopg2.connect(_dsn(), connect_timeout=10, sslmode="require")
 
 def _html(path: str) -> str:
@@ -34,7 +33,7 @@ def engine_kickoff_form() -> str:
                 SELECT forecast_id, forecast_name
                 FROM engine.forecast_registry
                 ORDER BY COALESCE(updated_at, created_at) ASC NULLS FIRST, forecast_name
-            """)
+            """ )
             for r in cur.fetchall():
                 options_html += f'<option value="{r["forecast_id"]}">{r["forecast_name"]}</option>'
     except Exception as e:

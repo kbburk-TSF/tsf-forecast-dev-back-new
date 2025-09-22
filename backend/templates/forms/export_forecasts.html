@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Export Forecasts</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;margin:24px;max-width:900px}
+  fieldset{border:1px solid #ddd;padding:16px;border-radius:8px}
+  button{padding:8px 14px;cursor:pointer}
+  pre{background:#f7f7f7;padding:12px;border-radius:6px}
+</style>
+<h2>Export Forecasts</h2>
+<fieldset>
+  <p>This exports a CSV of forecasts from the <code>air_quality_demo</code> database.</p>
+  <div class="row">
+    <form method="post" action="/forms/export-forecasts/run">
+      <button type="submit">Download CSV</button>
+    </form>
+  </div>
+  <p><small>Health check: <a href="/forms/export-forecasts/ping">/forms/export-forecasts/ping</a></small></p>
+</fieldset>
