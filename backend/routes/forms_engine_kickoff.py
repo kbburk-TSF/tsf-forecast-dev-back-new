@@ -1,5 +1,6 @@
 # ==============================================================================
-# backend/routes/forms_engine_kickoff.py  (TSF_ENGINE_APP DSN verbatim)
+# backend/routes/forms_engine_kickoff.py  (ROLLBACK — pre-TSF_ENGINE_APP)
+# Uses ENGINE_DATABASE_URL_DIRECT, then falls back to DATABASE_URL.
 # ==============================================================================
 import os, select, json, time
 from fastapi import APIRouter, Query, Form
@@ -10,15 +11,14 @@ from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
-def _dsn() -> str:
-    dsn = os.getenv("TSF_ENGINE_APP")
-    if not dsn:
-        raise RuntimeError("TSF_ENGINE_APP is not set")
-    return dsn
+def _db_url() -> str:
+    url = os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("ENGINE_DATABASE_URL_DIRECT or DATABASE_URL is not set")
+    return url
 
 def _connect():
-    # Use the DSN exactly as provided; enforce TLS and a short timeout.
-    return psycopg2.connect(_dsn(), connect_timeout=10, sslmode="require")
+    return psycopg2.connect(_db_url(), connect_timeout=10, sslmode="require")
 
 def _html(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
