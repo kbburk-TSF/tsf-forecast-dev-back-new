@@ -1,7 +1,6 @@
 # ==============================================================================
-# forms_engine_kickoff.py  (TSF_ENGINE_APP DSN)
-# Purpose: Use ONLY the TSF_ENGINE_APP environment variable for all DB access
-#          related to the kickoff form (no fallback, no pooling).
+# forms_engine_kickoff.py  (TSF_ENGINE_APP — RAW DSN)
+# Purpose: Use ONLY TSF_ENGINE_APP verbatim as the DSN. No parsing, no fallbacks.
 # ==============================================================================
 import os, select, json, time
 from fastapi import APIRouter, Query, Form
@@ -12,15 +11,15 @@ from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
-def _db_url() -> str:
-    url = os.getenv("TSF_ENGINE_APP")
-    if not url:
+def _dsn() -> str:
+    dsn = os.getenv("TSF_ENGINE_APP")
+    if not dsn:
         raise RuntimeError("TSF_ENGINE_APP is not set")
-    return url
+    return dsn
 
 def _connect():
-    # Fail fast if DSN is wrong; no pool, direct connect
-    return psycopg2.connect(_db_url(), connect_timeout=10)
+    # Use the DSN exactly as provided; add a short timeout and require TLS.
+    return psycopg2.connect(_dsn(), connect_timeout=10, sslmode="require")
 
 def _html(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
@@ -35,7 +34,7 @@ def engine_kickoff_form() -> str:
                 SELECT forecast_id, forecast_name
                 FROM engine.forecast_registry
                 ORDER BY COALESCE(updated_at, created_at) ASC NULLS FIRST, forecast_name
-            """ )
+            """)
             for r in cur.fetchall():
                 options_html += f'<option value="{r["forecast_id"]}">{r["forecast_name"]}</option>'
     except Exception as e:
@@ -114,6 +113,6 @@ def engine_kickoff_stream(run_id: str):
                     except Exception:
                         pass
         except Exception as e:
-            yield "data: {\"ok\": false, \"error\": \"%s\"}\n\n" % str(e).replace('"','\\"')
+            yield "data: {\"ok\": false, \"error\": \"%s\"}\n\n" % str(e).replace('"','\\\"')
             time.sleep(0.5)
     return StreamingResponse(event_gen(), media_type="text/event-stream")
