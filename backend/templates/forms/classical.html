@@ -7,25 +7,28 @@
   label{display:block;margin:8px 0 4px}
   button{padding:8px 14px;cursor:pointer}
   .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  select,input{min-width:260px}
 </style>
 
 <h2>Classical CSV Export</h2>
-<p>This page generates a CSV download directly from the backend.</p>
+<p>Values below are loaded from the database.</p>
 
 <form method="post" action="/forms/classical/run">
-  <fieldset>
-    <div class="row">
-      <div style="flex:1; min-width:260px">
-        <label for="parameter">Parameter</label>
-        <input id="parameter" name="parameter" class="input" placeholder="optional (not yet used)" />
-      </div>
-      <div style="flex:1; min-width:260px">
-        <label for="state">State</label>
-        <input id="state" name="state" class="input" placeholder="optional (not yet used)" />
-      </div>
+  <fieldset class="row">
+    <div style="flex:1">
+      <label for="parameter">Parameter</label>
+      <select id="parameter" name="parameter">
+        <!--__PARAM_OPTIONS__-->
+      </select>
     </div>
-    <div class="row" style="margin-top:12px">
-      <button type="submit">Download CSV</button>
+    <div style="flex:1">
+      <label for="state">State</label>
+      <select id="state" name="state">
+        <!--__STATE_OPTIONS__-->
+      </select>
     </div>
   </fieldset>
+  <div class="row" style="margin-top:12px">
+    <button type="submit">Download CSV</button>
+  </div>
 </form>

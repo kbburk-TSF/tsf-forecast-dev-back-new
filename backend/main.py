@@ -1,6 +1,6 @@
 # ==============================================================================
-# backend/main.py  -- RESTORE CSV BACKEND PAGE
-# Generated: 2025-09-22T01:53:43.880106Z
+# backend/main.py  -- RESTORE classical page + keep other forms mounted
+# Generated: 2025-09-22T02:03:29.272730Z
 # ==============================================================================
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,18 +29,22 @@ def safe_include(module_path: str, attr: str):
         log.error(f"Failed to mount {module_path}.{attr}: {e}")
         return False
 
-# Mount the legacy classical CSV page + run endpoint
+# Mount ALL known form routers (nothing removed)
+safe_include("backend.routes.forms_upload_historical", "router")
+safe_include("backend.routes.forms_engine_kickoff", "router")
+safe_include("backend.routes.forms_export_forecasts", "router")
 safe_include("backend.routes.forms_classical", "router")
-
-# If you also want the others mounted here, uncomment as needed:
-# safe_include("backend.routes.forms_upload_historical", "router")
-# safe_include("backend.routes.forms_engine_kickoff", "router")
-# safe_include("backend.routes.forms_export_forecasts", "router")
 
 @app.get("/health")
 def health():
-    return {"ok": True, "ts": "2025-09-22T01:53:43.880106Z"}
+    return {"ok": True, "ts": "2025-09-22T02:03:29.272730Z"}
 
 @app.get("/")
 def root():
-    return {"ok": True, "routes": ["/forms/classical", "/forms/classical/run"]}
+    return {"ok": True, "routes": [
+        "/forms/classical",
+        "/forms/classical/run",
+        "/forms/upload-historical",
+        "/forms/engine-kickoff",
+        "/forms/export-forecasts"
+    ]}
