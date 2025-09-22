@@ -1,9 +1,8 @@
-# ======================================================================
-# forms_engine_kickoff.py  (Selector Fix)
-# Date: 2025-09-22T00:17:03.403992Z
-# Change: Restore inline HTML options injection so the forecast <select> populates.
-#         (Removes Jinja rendering introduced in last patch.)
-# ======================================================================
+# ==============================================================================
+# forms_engine_kickoff.py  (STRICT DIRECT DSN)
+# Date: 2025-09-21T00:00:00Z
+# Change: Require ENGINE_DATABASE_URL_DIRECT. No fallback to pooled DATABASE_URL.
+# ==============================================================================
 import os, select, json, time
 from fastapi import APIRouter, Query, Form
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -14,13 +13,14 @@ from psycopg2.extras import RealDictCursor
 router = APIRouter()
 
 def _db_url() -> str:
-    url = os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("ENGINE_DATABASE_URL") or os.getenv("DATABASE_URL")
+    url = os.getenv("ENGINE_DATABASE_URL_DIRECT")
     if not url:
         raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
     return url
 
 def _connect():
-    return psycopg2.connect(_db_url())
+    # Add a small connect timeout to fail fast if DSN is wrong
+    return psycopg2.connect(_db_url(), connect_timeout=10)
 
 def _html(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
