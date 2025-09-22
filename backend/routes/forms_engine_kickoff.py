@@ -1,7 +1,7 @@
 # ==============================================================================
-# forms_engine_kickoff.py  (STRICT DIRECT DSN)
-# Date: 2025-09-21T00:00:00Z
-# Change: Require ENGINE_DATABASE_URL_DIRECT. No fallback to pooled DATABASE_URL.
+# forms_engine_kickoff.py  (TSF_ENGINE_APP DSN)
+# Purpose: Use ONLY the TSF_ENGINE_APP environment variable for all DB access
+#          related to the kickoff form (no fallback, no pooling).
 # ==============================================================================
 import os, select, json, time
 from fastapi import APIRouter, Query, Form
@@ -13,13 +13,13 @@ from psycopg2.extras import RealDictCursor
 router = APIRouter()
 
 def _db_url() -> str:
-    url = os.getenv("ENGINE_DATABASE_URL_DIRECT")
+    url = os.getenv("TSF_ENGINE_APP")
     if not url:
-        raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
+        raise RuntimeError("TSF_ENGINE_APP is not set")
     return url
 
 def _connect():
-    # Add a small connect timeout to fail fast if DSN is wrong
+    # Fail fast if DSN is wrong; no pool, direct connect
     return psycopg2.connect(_db_url(), connect_timeout=10)
 
 def _html(path: str) -> str:
@@ -114,6 +114,6 @@ def engine_kickoff_stream(run_id: str):
                     except Exception:
                         pass
         except Exception as e:
-            yield "data: {\"ok\": false, \"error\": \"%s\"}\n\n" % str(e).replace('"','\\\"')
+            yield "data: {\"ok\": false, \"error\": \"%s\"}\n\n" % str(e).replace('"','\\"')
             time.sleep(0.5)
     return StreamingResponse(event_gen(), media_type="text/event-stream")
