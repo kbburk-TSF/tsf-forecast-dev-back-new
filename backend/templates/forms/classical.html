@@ -1,41 +1,31 @@
-
 <!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Export Raw CSV (Selection Only)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:40px auto;max-width:880px;padding:0 16px;}
-    .row{display:flex;gap:16px;flex-wrap:wrap}
-    label{display:block;font-size:14px;color:#333;margin:8px 0 4px}
-    select,button{font-size:16px;padding:10px;border:1px solid #ccc;border-radius:8px}
-    button{background:#111;color:#fff;border:0;cursor:pointer}
-    .card{border:1px solid #eee;border-radius:12px;padding:16px;margin-top:20px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
-    .muted{color:#666}
-  </style>
-</head>
-<body>
-  <h1>Export Raw CSV</h1>
-  <form class="card" method="post" action="/forms/classical/run">
+<meta charset="utf-8">
+<title>Classical CSV Export</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;margin:24px;max-width:900px}
+  fieldset{border:1px solid #ddd;padding:16px;border-radius:8px}
+  label{display:block;margin:8px 0 4px}
+  button{padding:8px 14px;cursor:pointer}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+</style>
+
+<h2>Classical CSV Export</h2>
+<p>This page generates a CSV download directly from the backend.</p>
+
+<form method="post" action="/forms/classical/run">
+  <fieldset>
     <div class="row">
-      <div style="flex:1 1 280px">
-        <label>Parameter Name</label>
-        <select name="parameter" required>
-          {% for p in params %}<option value="{{p}}">{{p}}</option>{% endfor %}
-        </select>
+      <div style="flex:1; min-width:260px">
+        <label for="parameter">Parameter</label>
+        <input id="parameter" name="parameter" class="input" placeholder="optional (not yet used)" />
       </div>
-      <div style="flex:1 1 280px">
-        <label>State Name</label>
-        <select name="state" required>
-          {% for s in states %}<option value="{{s}}">{{s}}</option>{% endfor %}
-        </select>
+      <div style="flex:1; min-width:260px">
+        <label for="state">State</label>
+        <input id="state" name="state" class="input" placeholder="optional (not yet used)" />
       </div>
     </div>
     <div class="row" style="margin-top:12px">
       <button type="submit">Download CSV</button>
     </div>
-    <p class="muted">The file will contain: <strong>forecast_id, forecast_name, date, value</strong>.</p>
-  </form>
-</body>
-</html>
+  </fieldset>
+</form>

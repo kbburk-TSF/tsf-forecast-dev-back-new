@@ -1,10 +1,12 @@
 # ==============================================================================
-# backend/routes/forms_classical.py  (RESTORE legacy endpoint)
-# Provides POST /forms/classical/run to stream a CSV.
-# Uses AIR_QUALITY_DEMO DSN only (direct connection), no pooling.
+# backend/routes/forms_classical.py  (Backend page + CSV generator)
+# Provides:
+#   - GET  /forms/classical        -> renders classical.html page
+#   - POST /forms/classical/run    -> streams CSV
+# Uses AIR_QUALITY_DEMO direct DSN only.
 # ==============================================================================
-from fastapi import APIRouter, Form
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import APIRouter, Request, Form
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 import os, io, csv, psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -19,10 +21,15 @@ def _dsn() -> str:
 def _connect():
     return psycopg2.connect(_dsn(), connect_timeout=10, sslmode="require")
 
+@router.get("/forms/classical", response_class=HTMLResponse, tags=["forms"])
+def classical_page(request: Request):
+    html = open("backend/templates/forms/classical.html", "r", encoding="utf-8").read()
+    return HTMLResponse(html)
+
 @router.post("/forms/classical/run", tags=["forms"])
 def classical_run(parameter: str = Form(default=""), state: str = Form(default="")):
-    # Minimal, safe export that unblocks the frontend.
-    # Returns forecast_id, forecast_name, date (updated_at), value (NULL for now).
+    # Export structure expected by your frontend CSV: forecast_id, forecast_name, date, value
+    # This pulls from engine.forecast_registry; extend the SQL when measurement table is ready.
     sql = '''
     SELECT
       forecast_id::text AS forecast_id,
