@@ -1,12 +1,7 @@
 
 # backend/routes/views.py
-# Version: 2025-09-23 v3.0 (psycopg-only)
-# Purpose: Views API + HTML form using the same direct psycopg connection strategy as /views/meta.
-# Endpoints:
-#   - GET /views/               : HTML form
-#   - GET /views/meta_form      : models, series, most_recent
-#   - GET /views/ids            : forecast id/name list for selection
-#   - POST /views/query         : fetch rows
+# Version: 2025-09-23 v3.1 (psycopg-only)
+# Change: /views/ids now returns rows ONLY from engine.forecast_registry (ignores scope/model/series). No created_at usage.
 
 from typing import Optional, Dict, List
 from fastapi import APIRouter, HTTPException, Query
@@ -304,57 +299,26 @@ def meta_form():
         with _connect() as conn:
             views = _discover_views(conn)
             models = _extract_models(views)
-
-            # most recent by MAX(date)
-            most_recent = {}
-            def fetch_recent(vname: str):
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute(f"SELECT forecast_id FROM {vname} ORDER BY date DESC NULLS LAST LIMIT 1")
-                    r = cur.fetchone()
-                    return str(r["forecast_id"]) if r and r.get("forecast_id") else None
-
-            if _exists(views, "tsf_vw_daily_best"):
-                rid = fetch_recent("engine.tsf_vw_daily_best")
-                if rid:
-                    most_recent["global||"] = rid
-            for m in models:
-                v = f"engine.{m}_vw_daily_best"
-                if _exists(views, f"{m}_vw_daily_best"):
-                    rid = fetch_recent(v)
-                    if rid:
-                        most_recent[f"per_model|{m}|"] = rid
-            for m in models:
-                for ser in ("s","ms","sq","sqm"):
-                    vname = f"{m}_instance_forecast_{ser}_vw_daily_best"
-                    if _exists(views, vname):
-                        rid = fetch_recent(f"engine.{vname}")
-                        if rid:
-                            most_recent[f"per_table|{m}|{ser.upper()}"] = rid
-
-            return {"scopes":["per_table","per_model","global"], "models":models, "series":["S","MS","SQ","SQM"], "most_recent": most_recent}
+            return {"scopes":["per_table","per_model","global"], "models":models, "series":["S","MS","SQ","SQM"], "most_recent": {}}
     except Exception as e:
         return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "meta_form"}
 
 @router.get("/ids")
 def ids(scope: str = Query(...), model: Optional[str] = None, series: Optional[str] = None, limit: int = 100):
-    with _connect() as conn:
-        views = _discover_views(conn)
-        vname = _resolve_view(scope, model, series, views)
-        sql = f"""
-        SELECT fr.forecast_id AS id, COALESCE(fr.forecast_name, fr.forecast_id::text) AS name, x.mc
-        FROM (
-          SELECT forecast_id, MAX(date) AS mc
-          FROM {vname}
-          GROUP BY forecast_id
-        ) x
-        JOIN engine.forecast_registry fr ON fr.forecast_id = x.forecast_id
-        ORDER BY x.mc DESC NULLS LAST
-        LIMIT %s
-        """
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, (limit,))
+    # Return ONLY from forecast_registry, no view lookups, no created_at
+    try:
+        with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT fr.forecast_id AS id,
+                       COALESCE(fr.forecast_name, fr.forecast_id::text) AS name
+                FROM engine.forecast_registry fr
+                ORDER BY fr.forecast_id
+                LIMIT %s
+            """, (limit,))
             rows = cur.fetchall()
-    return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
+        return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
+    except Exception as e:
+        return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "ids"}
 
 class ViewsQueryBody(BaseModel):
     scope: str
