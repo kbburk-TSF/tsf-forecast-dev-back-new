@@ -27,14 +27,10 @@ def _dsn():
         or ""
     ).strip()
     # Fix bad channel_binding values caused by newline chars in .env
-    if "channel_binding=require
-" in raw:
-        raw = raw.replace("channel_binding=require
-", "channel_binding=require")
-    if "channel_binding=require
-" in raw:
-        raw = raw.replace("channel_binding=require
-", "channel_binding=require")
+    if "channel_binding=require\\n" in raw:
+        raw = raw.replace("channel_binding=require\\n", "channel_binding=require")
+    if "channel_binding=require\\n" in raw:
+        raw = raw.replace("channel_binding=require\\n", "channel_binding=require")
     return raw
 
 def _connect():

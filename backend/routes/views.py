@@ -20,10 +20,8 @@ def _build_engine_from_env() -> Engine:
     if not url:
         raise RuntimeError("TSF_ENGINE_APP not set")
     url = url.strip()
-    if "channel_binding=require
-" in url:
-        url = url.replace("channel_binding=require
-", "channel_binding=require")
+    if "channel_binding=require\\n" in url:
+        url = url.replace("channel_binding=require\\n", "channel_binding=require")
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     if url.startswith("postgresql://") and "+psycopg" not in url and "+psycopg2" not in url:
