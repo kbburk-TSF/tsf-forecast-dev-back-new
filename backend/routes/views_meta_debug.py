@@ -1,5 +1,5 @@
 # backend/routes/views_meta_debug.py
-# Version: v5.1 (2025-09-23)
+# Version: v5.2 (2025-09-23)
 # Purpose: Hardens /views/meta endpoint to NEVER hang. Returns precise DB errors when metadata fails.
 
 from fastapi import APIRouter
@@ -46,7 +46,6 @@ def get_views_meta():
 
     try:
         with conn, conn.cursor(row_factory=dict_row) as cur:
-            # Context info
             ctx = _fetch_one(cur, """
                 select
                   current_user,
@@ -56,7 +55,6 @@ def get_views_meta():
                   (select setting from pg_settings where name='search_path') as search_path
             """)
 
-            # Existence + privs check for engine.tsf_vw_daily_best
             _ = _fetch_one(cur, """
                 select
                   exists (
@@ -70,7 +68,6 @@ def get_views_meta():
             """, ("engine", "tsf_vw_daily_best", "engine", "engine.tsf_vw_daily_best"))
             checks = [{"schema": "engine", "name": "tsf_vw_daily_best", **_}]
 
-            # Smoke test select
             samples = []
             try:
                 rows = _fetch_all(cur, "select * from engine.tsf_vw_daily_best limit 1")
