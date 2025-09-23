@@ -37,9 +37,11 @@ safe_include("backend.routes.aggregate", "router")
 safe_include("backend.routes.meta", "router")
 safe_include("backend.routes.classical", "router")
 forms_mounted = safe_include("backend.routes.forms_classical_flow", "router") or safe_include("backend.routes.forms_raw", "router")
+
+# NEW: mount upload-historical routes (uses ENGINE_DATABASE_URL / ENGINE_DB_SCHEMA)
 safe_include("backend.routes.forms_upload_historical", "router")
 
-# NEW: Views API (uses TSF_ENGINE_APP only; read-only)
+# NEW: Views API + Form (TSF_ENGINE_APP only)
 safe_include("backend.routes.views", "router")
 
 @app.get("/", tags=["root"])
