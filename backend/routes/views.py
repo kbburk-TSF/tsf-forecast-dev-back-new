@@ -1,10 +1,10 @@
 
 # backend/routes/views.py
-# Version: 2025-09-23 v3.1 (psycopg-only)
-# Change: /views/ids now returns rows ONLY from engine.forecast_registry (ignores scope/model/series). No created_at usage.
-
+# Version: 2025-09-23 v3.2 (psycopg-only)
+# Change: /views/query now accepts both POST and GET to avoid client-method mismatches.
+#         Uses same SQL as before, pulling rows from resolved view.
 from typing import Optional, Dict, List
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query as FQuery, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import os, traceback
@@ -73,7 +73,7 @@ def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views
     if s == "per_table":
         if not (model and series):
             raise HTTPException(400, "Model and series required for per_table")
-        ser = series.lower()
+        ser = (series or "").lower()
         if ser not in ("s","ms","sq","sqm"):
             raise HTTPException(400, "Series must be S/MS/SQ/SQM")
         name = f"{model}_instance_forecast_{ser}_vw_daily_best"
@@ -168,7 +168,12 @@ def views_form():
         return r.json();
       }
       async function query(payload){
-        const r = await fetch('/views/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+        // Try POST first; if 404, fallback to GET
+        let r = await fetch('/views/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+        if(r.status === 404) {
+          const q = new URLSearchParams(payload);
+          r = await fetch('/views/query?' + q.toString());
+        }
         if(!r.ok) throw new Error('query ' + r.status);
         return r.json();
       }
@@ -304,8 +309,7 @@ def meta_form():
         return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "meta_form"}
 
 @router.get("/ids")
-def ids(scope: str = Query(...), model: Optional[str] = None, series: Optional[str] = None, limit: int = 100):
-    # Return ONLY from forecast_registry, no view lookups, no created_at
+def ids(scope: str = FQuery(...), model: Optional[str] = None, series: Optional[str] = None, limit: int = 100):
     try:
         with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
@@ -330,23 +334,45 @@ class ViewsQueryBody(BaseModel):
     page: int = 1
     page_size: int = 2000
 
-@router.post("/query")
-def query(body: ViewsQueryBody):
-    if not body.forecast_id:
+@router.api_route("/query", methods=["POST","GET"])
+async def run_query(request: Request, body: Optional[ViewsQueryBody] = None):
+    # Accept JSON (POST) or querystring (GET) for robustness
+    if request.method == "GET":
+        q = request.query_params
+        payload = ViewsQueryBody(
+            scope=q.get("scope",""),
+            model=q.get("model"),
+            series=q.get("series"),
+            forecast_id=q.get("forecast_id",""),
+            date_from=q.get("date_from"),
+            date_to=q.get("date_to"),
+            page=int(q.get("page","1") or 1),
+            page_size=int(q.get("page_size","2000") or 2000),
+        )
+    else:
+        if body is None:
+            data = await request.json()
+            payload = ViewsQueryBody(**data)
+        else:
+            payload = body
+
+    if not payload.forecast_id:
         raise HTTPException(400, "forecast_id required")
-    limit = max(1, min(10000, int(body.page_size or 2000)))
-    offset = max(0, (max(1, int(body.page or 1))-1) * limit)
+
+    limit = max(1, min(10000, int(payload.page_size or 2000)))
+    offset = max(0, (max(1, int(payload.page or 1))-1) * limit)
+
     with _connect() as conn:
         views = _discover_views(conn)
-        vname = _resolve_view(body.scope, body.model, body.series, views)
+        vname = _resolve_view(payload.scope, payload.model, payload.series, views)
         where = ["forecast_id = %s"]
-        params = [body.forecast_id]
-        if body.date_from:
+        params = [payload.forecast_id]
+        if payload.date_from:
             where.append("date >= %s")
-            params.append(body.date_from)
-        if body.date_to:
+            params.append(payload.date_from)
+        if payload.date_to:
             where.append("date <= %s")
-            params.append(body.date_to)
+            params.append(payload.date_to)
         where_sql = " AND ".join(where)
 
         cols = "date, value, fv_l, fv, fv_u, fv_mean_mae, fv_interval_odds, fv_interval_sig, fv_variance_mean, fv_mean_mae_c"
