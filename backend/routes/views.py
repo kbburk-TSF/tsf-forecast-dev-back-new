@@ -1,15 +1,6 @@
-def _db_url() -> str:
-    url = os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("ENGINE_DATABASE_URL") or os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
-    return url
-
 
 # backend/routes/views.py
-# Read-only Views API + simple HTML form.
-# Uses ONLY TSF_ENGINE_APP for DB access.
-# Forecast picker shows forecast_name but submits forecast_id.
-
+# Purpose: Views API + HTML form (NO /views/meta endpoint to avoid collision with views_meta_debug.py)
 from typing import Optional, Dict, List
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -46,7 +37,7 @@ def _discover_views() -> List[Dict[str,str]]:
     SELECT schemaname, viewname
     FROM pg_catalog.pg_views
     WHERE schemaname='engine'
-      AND (viewname = 'tsf_vw_daily_best' OR viewname LIKE '%_tsf_vw_daily_best')
+      AND (viewname = 'tsf_vw_daily_best' OR viewname LIKE '%_vw_daily_best')
     """
     with _conn() as conn:
         rows = conn.execute(text(sql)).mappings().all()
@@ -61,8 +52,8 @@ def _extract_models(views) -> List[str]:
         name = v["viewname"]
         if name == "tsf_vw_daily_best":
             continue
-        if name.endswith("_tsf_vw_daily_best"):
-            base = name[: -len("_tsf_vw_daily_best")]
+        if name.endswith("_vw_daily_best"):
+            base = name[: -len("_vw_daily_best")]
             for sfx in ("_instance_forecast_s", "_instance_forecast_ms", "_instance_forecast_msq", "_instance_forecast_msqm"):
                 if base.endswith(sfx):
                     base = base[: -len(sfx)]
@@ -75,11 +66,11 @@ def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views
     if s == "global":
         if not _exists(views, "tsf_vw_daily_best"):
             raise HTTPException(404, "Global view not found")
-        return "engine.tsf_tsf_vw_daily_best"
+        return "engine.tsf_vw_daily_best"
     if s == "per_model":
         if not model:
             raise HTTPException(400, "Model required for per_model")
-        name = f"{model}_tsf_vw_daily_best"
+        name = f"{model}_vw_daily_best"
         if not _exists(views, name):
             raise HTTPException(404, f"Per-model view not found: {name}")
         return f"engine.{name}"
@@ -89,7 +80,7 @@ def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views
         ser = series.lower()
         if ser not in ("s","ms","sq","sqm"):
             raise HTTPException(400, "Series must be S/MS/SQ/SQM")
-        name = f"{model}_instance_forecast_{ser}_tsf_vw_daily_best"
+        name = f"{model}_instance_forecast_{ser}_vw_daily_best"
         if not _exists(views, name):
             raise HTTPException(404, f"Per-table view not found: {name}")
         return f"engine.{name}"
@@ -281,7 +272,7 @@ def views_form():
           const res = await query(payload);
           renderHead(); renderRows(res.rows || []);
           el('csv').disabled = !(res.rows && res.rows.length);
-          setStatus(f"{(res.rows||[]).length} / {res.total} rows");  # noqa: E999
+          setStatus(String((res.rows||[]).length) + ' / ' + String(res.total) + ' rows');
         }catch(e){
           setStatus('Query failed: ' + e.message);
         }
@@ -295,54 +286,16 @@ def views_form():
         }
       });
 
-      el('load').addEventListener('click', doLoad);
-      el('csv').addEventListener('click', () => {
-        const rows = Array.from(el('body').querySelectorAll('tr')).map(tr => Array.from(tr.children).map(td => td.textContent));
-        const head = HEADERS.join(',');
-        const lines = rows.map(r => r.join(','));
-        const blob = new Blob([head + "\n" + lines.join("\n")], {type: 'text/csv'});
-        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'view_slice.csv'; a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 500);
+      document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('load').addEventListener('click', doLoad);
+        renderHead();
+        bootstrap();
       });
-
-      renderHead();
-      bootstrap();
     </script>
   </body>
 </html>
     """
     return HTMLResponse(content=html)
-
-@router.get("/meta")
-def meta():
-    views = _discover_views()
-    models = _extract_models(views)
-    most_recent = {}
-    def fetch_recent(vname: str):
-        sql = f"SELECT forecast_id FROM {vname} ORDER BY created_at DESC NULLS LAST LIMIT 1"
-        with _conn() as conn:
-            row = conn.execute(text(sql)).mappings().first()
-            return str(row["forecast_id"]) if row and row.get("forecast_id") else None
-
-    if _exists(views, "tsf_vw_daily_best"):
-        rid = fetch_recent("engine.tsf_tsf_vw_daily_best")
-        if rid:
-            most_recent["global||"] = rid
-    for m in models:
-        v = f"engine.{m}_tsf_vw_daily_best"
-        if _exists(views, f"{m}_tsf_vw_daily_best"):
-            rid = fetch_recent(v)
-            if rid:
-                most_recent[f"per_model|{m}|"] = rid
-    for m in models:
-        for ser in ("s","ms","sq","sqm"):
-            vname = f"{m}_instance_forecast_{ser}_tsf_vw_daily_best"
-            if _exists(views, vname):
-                rid = fetch_recent(f"engine.{vname}")
-                if rid:
-                    most_recent[f"per_table|{m}|{ser.upper()}"] = rid
-
-    return {"scopes":["per_table","per_model","global"], "models":models, "series":["S","MS","SQ","SQM"], "most_recent": most_recent}
 
 @router.get("/ids")
 def ids(scope: str = Query(...), model: Optional[str] = None, series: Optional[str] = None, limit: int = 100):
