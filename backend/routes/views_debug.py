@@ -17,6 +17,7 @@ class ProbeResult(BaseModel):
     details: dict
 
 
+
 def _dsn():
     raw = (
         os.environ.get("DATABASE_URL")
