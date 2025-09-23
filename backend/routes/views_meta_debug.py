@@ -1,6 +1,7 @@
 # backend/routes/views_meta_debug.py
-# Version: v6.0 (2025-09-23)
-# Purpose: Fully hardened /views/meta endpoint. Never raises a raw 500 — always returns JSON with exact error + traceback.
+# Version: v7.0 (2025-09-23)
+# Purpose: Minimal hardened /views/meta endpoint for pinpoint diagnosis.
+# Runs step-by-step and stops at first failure, always returning JSON.
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -16,52 +17,46 @@ class MetaResponse(BaseModel):
     details: dict
 
 def _db_url() -> str:
-    url = os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("ENGINE_DATABASE_URL") or os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
-    return url
-
-def _connect():
-    return psycopg.connect(_db_url(), autocommit=True)
-
-def _fetch_one(cur, sql, params=None):
-    cur.execute(sql, params or ())
-    return cur.fetchone()
-
-def _fetch_all(cur, sql, params=None):
-    cur.execute(sql, params or ())
-    return cur.fetchall()
+    return (
+        os.getenv("ENGINE_DATABASE_URL_DIRECT")
+        or os.getenv("ENGINE_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+    )
 
 @router.get("/meta", response_model=MetaResponse)
 def get_views_meta():
+    dsn = _db_url()
+    if not dsn:
+        return MetaResponse(ok=False, step="config", details={"error": "No DB URL"})
+
     try:
-        conn = _connect()
+        conn = psycopg.connect(dsn, autocommit=True)
     except Exception as e:
         return MetaResponse(ok=False, step="connect", details={
             "error": str(e),
-            "sqlstate": getattr(e, "sqlstate", None),
-            "trace": traceback.format_exc(),
-            "dsn_present": True
+            "trace": traceback.format_exc()
         })
 
     try:
         with conn, conn.cursor(row_factory=dict_row) as cur:
+            # Step 1: Context
             try:
-                ctx = _fetch_one(cur, """
+                ctx = cur.execute("""
                     select
                       current_user,
                       session_user,
                       current_database() as db,
                       (select current_schema()) as current_schema,
                       (select setting from pg_settings where name='search_path') as search_path
-                """)
+                """).fetchone()
             except Exception as e:
                 return MetaResponse(ok=False, step="context", details={
-                    "error": str(e), "sqlstate": getattr(e,"sqlstate",None), "trace": traceback.format_exc()
+                    "error": str(e), "trace": traceback.format_exc()
                 })
 
+            # Step 2: Existence + privileges
             try:
-                _ = _fetch_one(cur, """
+                chk = cur.execute("""
                     select
                       exists (
                         select 1
@@ -71,44 +66,26 @@ def get_views_meta():
                       ) as exists,
                       has_schema_privilege(current_user, %s, 'USAGE') as has_usage,
                       has_table_privilege(current_user, %s, 'SELECT') as has_select
-                """, ("engine", "tsf_vw_daily_best", "engine", "engine.tsf_vw_daily_best"))
-                checks = [{"schema": "engine", "name": "tsf_vw_daily_best", **_}]
+                """, ("engine","tsf_vw_daily_best","engine","engine.tsf_vw_daily_best")).fetchone()
             except Exception as e:
-                return MetaResponse(ok=False, step="privileges/existence", details={
-                    "error": str(e), "sqlstate": getattr(e,"sqlstate",None), "trace": traceback.format_exc()
+                return MetaResponse(ok=False, step="privileges", details={
+                    "error": str(e), "trace": traceback.format_exc(), "context": ctx
                 })
 
+            # Step 3: Smoke test
             try:
-                samples = []
-                rows = _fetch_all(cur, "select * from engine.tsf_vw_daily_best limit 1")
-                samples.append({"test": "engine.tsf_vw_daily_best", "ok": True, "rowcount": len(rows)})
+                rows = cur.execute("select * from engine.tsf_vw_daily_best limit 1").fetchall()
             except Exception as e:
-                return MetaResponse(ok=False, step="select engine.tsf_vw_daily_best", details={
-                    "error": str(e), "sqlstate": getattr(e,"sqlstate",None), "trace": traceback.format_exc(),
-                    "checks": checks, "context": ctx
-                })
-
-            try:
-                schemas = _fetch_all(cur, """
-                    select nspname as schema
-                    from pg_namespace
-                    where nspname not like 'pg\_%' and nspname <> 'information_schema'
-                    order by 1
-                """)
-            except Exception as e:
-                return MetaResponse(ok=False, step="list_schemas", details={
-                    "error": str(e), "sqlstate": getattr(e,"sqlstate",None), "trace": traceback.format_exc()
+                return MetaResponse(ok=False, step="smoke", details={
+                    "error": str(e), "trace": traceback.format_exc(),
+                    "context": ctx, "checks": chk
                 })
 
             return MetaResponse(ok=True, step="meta", details={
                 "context": ctx,
-                "schemas": schemas,
-                "view_smoke_tests": samples
+                "checks": chk,
+                "rows_returned": len(rows)
             })
-    except Exception as e:
-        return MetaResponse(ok=False, step="unexpected", details={
-            "error": str(e), "trace": traceback.format_exc()
-        })
     finally:
         try:
             conn.close()
