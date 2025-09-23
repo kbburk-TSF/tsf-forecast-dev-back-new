@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -36,9 +37,10 @@ safe_include("backend.routes.aggregate", "router")
 safe_include("backend.routes.meta", "router")
 safe_include("backend.routes.classical", "router")
 forms_mounted = safe_include("backend.routes.forms_classical_flow", "router") or safe_include("backend.routes.forms_raw", "router")
-
-# NEW: mount upload-historical routes (uses ENGINE_DATABASE_URL / ENGINE_DB_SCHEMA)
 safe_include("backend.routes.forms_upload_historical", "router")
+
+# NEW: Views API (uses TSF_ENGINE_APP only; read-only)
+safe_include("backend.routes.views", "router")
 
 @app.get("/", tags=["root"])
 def root():
@@ -68,10 +70,8 @@ INLINE_FORM = '''
 
 @app.get("/forms/classical", response_class=HTMLResponse, tags=["forms"])
 def classical_get():
-    # If a forms router is mounted, its route will overshadow this one.
     return HTMLResponse(INLINE_FORM)
 
 @app.post("/forms/classical/run", tags=["forms"])
 def classical_post(parameter: str = Form(...), state: str = Form(...)):
-    # If a forms router is mounted, it will own this path and run the full pipeline.
     return JSONResponse({"ok": False, "detail": "Fallback only. Forms router not mounted.", "parameter": parameter, "state": state}, status_code=501)
