@@ -46,7 +46,7 @@ def _discover_views() -> List[Dict[str,str]]:
     SELECT schemaname, viewname
     FROM pg_catalog.pg_views
     WHERE schemaname='engine'
-      AND (viewname = 'vw_daily_best' OR viewname LIKE '%_vw_daily_best')
+      AND (viewname = 'tsf_vw_daily_best' OR viewname LIKE '%_tsf_vw_daily_best')
     """
     with _conn() as conn:
         rows = conn.execute(text(sql)).mappings().all()
@@ -59,10 +59,10 @@ def _extract_models(views) -> List[str]:
     models = set()
     for v in views:
         name = v["viewname"]
-        if name == "vw_daily_best":
+        if name == "tsf_vw_daily_best":
             continue
-        if name.endswith("_vw_daily_best"):
-            base = name[: -len("_vw_daily_best")]
+        if name.endswith("_tsf_vw_daily_best"):
+            base = name[: -len("_tsf_vw_daily_best")]
             for sfx in ("_instance_forecast_s", "_instance_forecast_ms", "_instance_forecast_msq", "_instance_forecast_msqm"):
                 if base.endswith(sfx):
                     base = base[: -len(sfx)]
@@ -73,13 +73,13 @@ def _extract_models(views) -> List[str]:
 def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
     s = (scope or "").lower()
     if s == "global":
-        if not _exists(views, "vw_daily_best"):
+        if not _exists(views, "tsf_vw_daily_best"):
             raise HTTPException(404, "Global view not found")
-        return "engine.vw_daily_best"
+        return "engine.tsf_tsf_vw_daily_best"
     if s == "per_model":
         if not model:
             raise HTTPException(400, "Model required for per_model")
-        name = f"{model}_vw_daily_best"
+        name = f"{model}_tsf_vw_daily_best"
         if not _exists(views, name):
             raise HTTPException(404, f"Per-model view not found: {name}")
         return f"engine.{name}"
@@ -89,7 +89,7 @@ def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views
         ser = series.lower()
         if ser not in ("s","ms","sq","sqm"):
             raise HTTPException(400, "Series must be S/MS/SQ/SQM")
-        name = f"{model}_instance_forecast_{ser}_vw_daily_best"
+        name = f"{model}_instance_forecast_{ser}_tsf_vw_daily_best"
         if not _exists(views, name):
             raise HTTPException(404, f"Per-table view not found: {name}")
         return f"engine.{name}"
@@ -324,19 +324,19 @@ def meta():
             row = conn.execute(text(sql)).mappings().first()
             return str(row["forecast_id"]) if row and row.get("forecast_id") else None
 
-    if _exists(views, "vw_daily_best"):
-        rid = fetch_recent("engine.vw_daily_best")
+    if _exists(views, "tsf_vw_daily_best"):
+        rid = fetch_recent("engine.tsf_tsf_vw_daily_best")
         if rid:
             most_recent["global||"] = rid
     for m in models:
-        v = f"engine.{m}_vw_daily_best"
-        if _exists(views, f"{m}_vw_daily_best"):
+        v = f"engine.{m}_tsf_vw_daily_best"
+        if _exists(views, f"{m}_tsf_vw_daily_best"):
             rid = fetch_recent(v)
             if rid:
                 most_recent[f"per_model|{m}|"] = rid
     for m in models:
         for ser in ("s","ms","sq","sqm"):
-            vname = f"{m}_instance_forecast_{ser}_vw_daily_best"
+            vname = f"{m}_instance_forecast_{ser}_tsf_vw_daily_best"
             if _exists(views, vname):
                 rid = fetch_recent(f"engine.{vname}")
                 if rid:
