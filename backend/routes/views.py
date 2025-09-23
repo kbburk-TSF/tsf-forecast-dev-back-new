@@ -1,5 +1,10 @@
-# Version: patched-for-dsn-fix (2025-09-23)
-# Version: patched-for-dsn-fix (2025-09-23)
+def _db_url() -> str:
+    url = os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("ENGINE_DATABASE_URL") or os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
+    return url
+
+
 # backend/routes/views.py
 # Read-only Views API + simple HTML form.
 # Uses ONLY TSF_ENGINE_APP for DB access.
@@ -19,9 +24,6 @@ def _build_engine_from_env() -> Engine:
     url = os.getenv("TSF_ENGINE_APP")
     if not url:
         raise RuntimeError("TSF_ENGINE_APP not set")
-    url = url.strip()
-    if "channel_binding=require\\n" in url:
-        url = url.replace("channel_binding=require\\n", "channel_binding=require")
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     if url.startswith("postgresql://") and "+psycopg" not in url and "+psycopg2" not in url:

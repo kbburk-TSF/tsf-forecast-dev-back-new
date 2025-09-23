@@ -16,26 +16,14 @@ class ProbeResult(BaseModel):
     step: str
     details: dict
 
-
-
-
-def _dsn():
-    raw = (
-        os.environ.get("DATABASE_URL")
-        or os.environ.get("NEON_DATABASE_URL")
-        or os.environ.get("POSTGRES_URL")
-        or ""
-    ).strip()
-    # Fix bad channel_binding values caused by newline chars in .env
-    if "channel_binding=require\\n" in raw:
-        raw = raw.replace("channel_binding=require\\n", "channel_binding=require")
-    if "channel_binding=require\\n" in raw:
-        raw = raw.replace("channel_binding=require\\n", "channel_binding=require")
-    return raw
+def _db_url() -> str:
+    url = os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("ENGINE_DATABASE_URL") or os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
+    return url
 
 def _connect():
-    dsn = _dsn()
-    return psycopg.connect(dsn, autocommit=True)
+    return psycopg.connect(_db_url(), autocommit=True)
 
 def _probe_sql(cur, step, sql, params=None):
     try:
