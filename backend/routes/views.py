@@ -1,15 +1,13 @@
 
 # backend/routes/views.py
-# Version: 2025-09-23 v3.3 (psycopg-only)
-# Fix: Correct per-table series mapping -> table suffix
-#   UI shows S / SQ / SQM (we also accept MS as alias of S).
-#   Mapping: S|MS -> ms, SQ -> msq, SQM -> msqm
+# Version: 2025-09-23 v4.0 (psycopg-only)
+# Adds: /views/export (CSV download for the full table view, no pagination).
 
 from typing import Optional, Dict, List
 from fastapi import APIRouter, HTTPException, Query as FQuery, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from pydantic import BaseModel
-import os, traceback
+import os, traceback, io, csv, datetime as dt
 import psycopg
 from psycopg.rows import dict_row
 
@@ -59,6 +57,7 @@ def _extract_models(views) -> List[str]:
             models.add(base)
     return sorted(models)
 
+# Correct series mapping based on your schema
 _SERIES_MAP = {
     "s": "ms",
     "ms": "ms",
@@ -143,12 +142,14 @@ def views_form():
           <div><label>From</label><input type="date" id="from"/></div>
           <div><label>To</label><input type="date" id="to"/></div>
         </div>
-        <div style="align-self:end"><button class="btn" id="load">Load</button></div>
+        <div style="align-self:end; display:flex; gap:10px;">
+          <button class="btn" id="load">Load</button>
+          <button class="btn" id="csv" disabled>Export CSV</button>
+        </div>
       </div>
 
       <div class="row" style="justify-content:space-between">
         <div class="muted" id="status">Loading metadata…</div>
-        <div><button class="btn" id="csv" disabled>Export CSV</button></div>
       </div>
 
       <div style="overflow:auto; max-height:60vh; border:1px solid var(--border); border-radius:10px;">
@@ -198,7 +199,7 @@ def views_form():
       function fillSelect(sel, vals){
         sel.innerHTML = '';
         if(!vals || !vals.length){
-          const o = document.createElement('option'); o.textContent = '(none)'; o.value=''; sel.appendChild(o);
+        const o = document.createElement('option'); o.textContent = '(none)'; o.value=''; sel.appendChild(o);
           return;
         }
         vals.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o); });
@@ -222,32 +223,6 @@ def views_form():
         });
       }
 
-      async function bootstrap(){
-        try{
-          const m = await meta();
-          setStatus('Meta loaded');
-          fillSelect(el('model'), m.models);
-          await refreshIds();
-        }catch(e){
-          setStatus('Meta load failed: ' + e.message);
-        }
-      }
-
-      async function refreshIds(){
-        const scope = SCOPE();
-        el('seriesWrap').style.display = (scope === 'per_table') ? 'block' : 'none';
-        const model = (scope === 'global') ? '' : el('model').value;
-        const series = (scope === 'per_table') ? el('series').value : '';
-        try{
-          const list = await ids(scope, model, series);
-          fillSelectPairs(el('fid'), list);
-          setStatus((list.length ? 'Pick a forecast and Load' : 'No forecasts for this selection'));
-        }catch(e){
-          setStatus('IDs load failed: ' + e.message);
-          fillSelectPairs(el('fid'), []);
-        }
-      }
-
       function currentRange(){
         const p = el('preset').value;
         if(p === 'custom'){
@@ -262,9 +237,9 @@ def views_form():
         return {date_from, date_to};
       }
 
-      async function doLoad(){
+      function buildPayload(){
         const scope = SCOPE();
-        const payload = {
+        return {
           scope,
           model: scope==='global' ? '' : el('model').value,
           series: scope==='per_table' ? el('series').value : '',
@@ -272,12 +247,51 @@ def views_form():
           ...currentRange(),
           page: 1, page_size: 2000
         };
+      }
+
+      function updateExportHref(){
+        const p = buildPayload();
+        if(!p.forecast_id){ el('csv').disabled = true; return; }
+        const q = new URLSearchParams(p);
+        el('csv').dataset.href = '/views/export?' + q.toString();
+        el('csv').disabled = false;
+      }
+
+      async function refreshIds(){
+        const scope = SCOPE();
+        el('seriesWrap').style.display = (scope === 'per_table') ? 'block' : 'none';
+        const model = (scope === 'global') ? '' : el('model').value;
+        const series = (scope === 'per_table') ? el('series').value : '';
+        try{
+          const list = await ids(scope, model, series);
+          fillSelectPairs(el('fid'), list);
+          setStatus((list.length ? 'Pick a forecast and Load' : 'No forecasts for this selection'));
+          updateExportHref();
+        }catch(e){
+          setStatus('IDs load failed: ' + e.message);
+          fillSelectPairs(el('fid'), []);
+          updateExportHref();
+        }
+      }
+
+      async function bootstrap(){
+        try{
+          const m = await meta();
+          setStatus('Meta loaded');
+          fillSelect(el('model'), m.models);
+          await refreshIds();
+        }catch(e){
+          setStatus('Meta load failed: ' + e.message);
+        }
+      }
+
+      async function doLoad(){
+        const payload = buildPayload();
         if(!payload.forecast_id){ setStatus('Select a forecast first'); return; }
         setStatus('Loading…');
         try{
           const res = await query(payload);
           renderHead(); renderRows(res.rows || []);
-          el('csv').disabled = !(res.rows && res.length);
           setStatus(String((res.rows||[]).length) + ' / ' + String(res.total) + ' rows');
         }catch(e){
           setStatus('Query failed: ' + e.message);
@@ -287,13 +301,21 @@ def views_form():
       document.addEventListener('change', (ev) => {
         if(ev.target.name === 'scope'){ refreshIds(); }
         if(ev.target.id === 'model' || ev.target.id === 'series'){ refreshIds(); }
+        if(ev.target.id === 'fid'){ updateExportHref(); }
         if(ev.target.id === 'preset'){
           el('customDates').style.display = (el('preset').value === 'custom') ? 'flex' : 'none';
+          updateExportHref();
         }
+        if(ev.target.id === 'from' || ev.target.id === 'to'){ updateExportHref(); }
       });
 
       document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('load').addEventListener('click', doLoad);
+        document.getElementById('csv').addEventListener('click', (ev) => {
+          const href = ev.currentTarget.dataset.href;
+          if(!href){ ev.preventDefault(); return; }
+          window.location.href = href;
+        });
         renderHead();
         bootstrap();
       });
@@ -369,3 +391,50 @@ def run_query(body: ViewsQueryBody):
             cur.execute(sql, params + [limit, offset])
             rows = cur.fetchall()
     return {"rows": rows, "total": total}
+
+@router.get("/export")
+def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = None,
+               forecast_id: str = FQuery(...), date_from: Optional[str] = None, date_to: Optional[str] = None):
+    # Stream full CSV (no pagination)
+    with _connect() as conn:
+        views = _discover_views(conn)
+        vname = _resolve_view(scope, model, series, views)
+        where = ["forecast_id = %s"]
+        params = [forecast_id]
+        if date_from:
+            where.append("date >= %s")
+            params.append(date_from)
+        if date_to:
+            where.append("date <= %s")
+            params.append(date_to)
+        where_sql = " AND ".join(where)
+
+        cols = ["date","value","fv_l","fv","fv_u","fv_mean_mae","fv_interval_odds","fv_interval_sig","fv_variance_mean","fv_mean_mae_c"]
+        sql = f"SELECT {', '.join(cols)} FROM {vname} WHERE {where_sql} ORDER BY date ASC"
+
+        def row_iter():
+            yield (",".join(cols) + "\n").encode("utf-8")
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                for rec in cur:
+                    # rec is a tuple in declared column order
+                    line = []
+                    for v in rec:
+                        if v is None:
+                            line.append("")
+                        elif isinstance(v, dt.date):
+                            line.append(v.isoformat())
+                        else:
+                            s = str(v)
+                            if any(ch in s for ch in [',','\n','"']):
+                                s = '"' + s.replace('"','""') + '"'
+                            line.append(s)
+                    yield (",".join(line) + "\n").encode("utf-8")
+
+        fname_bits = [scope or 'view']
+        if model: fname_bits.append(model)
+        if series: fname_bits.append(series.upper())
+        if forecast_id: fname_bits.append(str(forecast_id))
+        filename = "tsf_export_" + "_".join(fname_bits) + ".csv"
+        return StreamingResponse(row_iter(), media_type="text/csv",
+                                 headers={"Content-Disposition": f"attachment; filename={filename}"})
