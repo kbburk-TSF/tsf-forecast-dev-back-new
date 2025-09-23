@@ -1,5 +1,5 @@
 # backend/routes/views_meta_debug.py
-# Version: v5.0 (2025-09-23)
+# Version: v5.1 (2025-09-23)
 # Purpose: Hardens /views/meta endpoint to NEVER hang. Returns precise DB errors when metadata fails.
 
 from fastapi import APIRouter
@@ -54,7 +54,7 @@ def get_views_meta():
                   current_database() as db,
                   (select current_schema()) as current_schema,
                   (select setting from pg_settings where name='search_path') as search_path
-            ")
+            """)
 
             # Existence + privs check for engine.tsf_vw_daily_best
             _ = _fetch_one(cur, """
@@ -84,9 +84,9 @@ def get_views_meta():
             schemas = _fetch_all(cur, """
                 select nspname as schema
                 from pg_namespace
-                where nspname not like 'pg\\_%' and nspname <> 'information_schema'
+                where nspname not like 'pg\_%' and nspname <> 'information_schema'
                 order by 1
-            ")
+            """)
 
             return MetaResponse(ok=True, step="meta", details={
                 "context": ctx,

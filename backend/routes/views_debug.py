@@ -11,6 +11,7 @@ router = APIRouter(prefix="/views", tags=["views"])
 SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def _dsn() -> str:
+    # Preserve existing precedence; strip to avoid stray newlines/whitespace
     raw = (
         os.getenv("ENGINE_DATABASE_URL_DIRECT")
         or os.getenv("ENGINE_DATABASE_URL")
@@ -60,6 +61,7 @@ def check(schema: str, name: str) -> Dict[str, Any]:
 def probe_diagnose() -> Dict[str, Any]:
     checks: List[Dict[str, Any]] = [
         check("engine", "tsf_vw_daily_best"),
+        check("pg_views", "tsf_vw_daily_best"),
     ]
     ok = all(c.get("exists") and c.get("has_select") for c in checks if c.get("error") is None)
     return {"ok": ok, "step": "privileges", "details": {"checks": checks}}
