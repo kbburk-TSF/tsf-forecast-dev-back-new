@@ -1,16 +1,30 @@
+# main.py — TSF Backend (universal router loader)
+# Version: 2025-09-23 v1.0 — Complete replacement; auto-mounts every router in backend.routes
+# Notes: Discovers modules under backend.routes, includes APIRouters named `router` or iterables `routers`.
+#        If a module exposes a FastAPI `app`, it mounts it at /<module> as a sub-app.
+#        Safe: a failing module won't crash startup; errors are logged.
 
-from fastapi import FastAPI, HTTPException, Request, Form
+import os
+import logging
+import importlib
+import pkgutil
+from typing import Iterable, Any
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
-from backend.database import engine
-import os, logging
+
+# Your project database engine
+try:
+    from backend.database import engine  # expects ENGINE_DATABASE_URL to be configured
+except Exception:  # keep startup resilient even if DB import has issues
+    engine = None
 
 log = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="TSF Backend", version=os.getenv("APP_VERSION") or "dev")
 
-# CORS
+# ---------- CORS ----------
 env_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
 allowed = [o.strip() for o in env_origins.split(",") if o.strip()] or ["*"]
 app.add_middleware(
@@ -21,59 +35,87 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def safe_include(module_path: str, attr: str):
+# ---------- Router auto-loader ----------
+def include_router_obj(obj: Any) -> bool:
     try:
-        mod = __import__(module_path, fromlist=[attr])
-        app.include_router(getattr(mod, attr))
-        log.info(f"Mounted router: {module_path}.{attr}")
-        return True
+        # APIRouter duck-typing: must have .routes attribute
+        if obj is None:
+            return False
+        if hasattr(obj, "routes"):
+            app.include_router(obj)
+            return True
+        return False
     except Exception as e:
-        log.error(f"Failed to mount {module_path}.{attr}: {e}")
+        log.error(f"Failed to include router: {e}")
         return False
 
-# Try to mount routers (won't crash on failure)
-safe_include("backend.routes.data", "router")
-safe_include("backend.routes.aggregate", "router")
-safe_include("backend.routes.meta", "router")
-safe_include("backend.routes.classical", "router")
-forms_mounted = safe_include("backend.routes.forms_classical_flow", "router") or safe_include("backend.routes.forms_raw", "router")
+def mount_all_route_modules() -> None:
+    try:
+        routes_pkg = importlib.import_module("backend.routes")
+    except Exception as e:
+        log.error(f"Cannot import backend.routes: {e}")
+        return
 
-# NEW: mount upload-historical routes (uses ENGINE_DATABASE_URL / ENGINE_DB_SCHEMA)
-safe_include("backend.routes.forms_upload_historical", "router")
+    for finder, name, ispkg in pkgutil.iter_modules(routes_pkg.__path__):
+        if ispkg or name.startswith(("_", ".")):
+            continue
+        module_path = f"{routes_pkg.__name__}.{name}"
+        try:
+            mod = importlib.import_module(module_path)
+        except Exception as e:
+            log.error(f"Failed to import {module_path}: {e}")
+            continue
 
-# NEW: Views API + Form (TSF_ENGINE_APP only)
-safe_include("backend.routes.views", "router")
+        mounted = False
 
-@app.get("/", tags=["root"])
+        # Prefer a single `router`
+        router = getattr(mod, "router", None)
+        if router is not None:
+            mounted = include_router_obj(router)
+
+        # Support multiple routers via `routers` iterable
+        if not mounted:
+            routers = getattr(mod, "routers", None)
+            if isinstance(routers, Iterable):
+                ok_any = False
+                for r in routers:
+                    ok_any = include_router_obj(r) or ok_any
+                mounted = ok_any
+
+        # If a sub-app is provided, mount at /<module>
+        if not mounted:
+            subapp = getattr(mod, "app", None)
+            if subapp is not None:
+                try:
+                    app.mount(f"/{name}", subapp)
+                    mounted = True
+                except Exception as e:
+                    log.error(f"Failed to mount sub-app from {module_path}: {e}")
+
+        if mounted:
+            log.info(f"Mounted routes from {module_path}")
+        else:
+            log.warning(f"No router/app found to mount in {module_path}")
+
+mount_all_route_modules()
+
+# ---------- Meta endpoints ----------
+@app.get("/", tags=["meta"])
 def root():
-    return {"ok": True, "service": "tsf-backend", "forms": {"classical": "/forms/classical", "upload": "/forms/upload-historical"}, "docs": "/docs", "health": "/health"}
+    return {
+        "ok": True,
+        "service": "tsf-backend",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
 @app.get("/health", tags=["meta"])
 def health():
+    if engine is None:
+        return {"ok": True, "database": "unavailable (engine import failed)"}
     try:
         with engine.begin() as conn:
             conn.execute(text("SELECT 1"))
         return {"ok": True, "database": "connected"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-INLINE_FORM = '''
-<!doctype html><html><head><meta charset="utf-8"><title>TSF Classical</title></head>
-<body style="font-family:system-ui;max-width:720px;margin:40px auto">
-<h1>Run Classical Forecast</h1>
-<form method="post" action="/forms/classical/run">
-  <label>Parameter Name<br><input name="parameter" required placeholder="e.g., CO"></label><br><br>
-  <label>State Name<br><input name="state" required placeholder="e.g., California"></label><br><br>
-  <button type="submit">Run</button>
-</form>
-<p>This is a fallback so the route never 404s. If your full form is mounted, it will take precedence.</p>
-</body></html>
-'''
-
-@app.get("/forms/classical", response_class=HTMLResponse, tags=["forms"])
-def classical_get():
-    return HTMLResponse(INLINE_FORM)
-
-@app.post("/forms/classical/run", tags=["forms"])
-def classical_post(parameter: str = Form(...), state: str = Form(...)):
-    return JSONResponse({"ok": False, "detail": "Fallback only. Forms router not mounted.", "parameter": parameter, "state": state}, status_code=501)
