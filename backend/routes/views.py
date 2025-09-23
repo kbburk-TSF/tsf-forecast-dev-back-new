@@ -1,3 +1,5 @@
+# Version: patched-for-dsn-fix (2025-09-23)
+# Version: patched-for-dsn-fix (2025-09-23)
 # backend/routes/views.py
 # Read-only Views API + simple HTML form.
 # Uses ONLY TSF_ENGINE_APP for DB access.
