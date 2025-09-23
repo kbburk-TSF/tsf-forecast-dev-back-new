@@ -17,13 +17,24 @@ class MetaResponse(BaseModel):
     step: str
     details: dict
 
+
 def _dsn():
-    return (
+    raw = (
         os.environ.get("DATABASE_URL")
         or os.environ.get("NEON_DATABASE_URL")
         or os.environ.get("POSTGRES_URL")
         or ""
-    )
+    ).strip()
+    # Fix bad channel_binding values caused by newline chars in .env
+    if "channel_binding=require
+" in raw:
+        raw = raw.replace("channel_binding=require
+", "channel_binding=require")
+    if "channel_binding=require
+" in raw:
+        raw = raw.replace("channel_binding=require
+", "channel_binding=require")
+    return raw
 
 def _connect():
     dsn = _dsn()
