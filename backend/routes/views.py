@@ -46,7 +46,7 @@ def _discover_views() -> List[Dict[str,str]]:
     SELECT schemaname, viewname
     FROM pg_catalog.pg_views
     WHERE schemaname='engine'
-      AND (viewname = 'tsf_vw_daily_best' OR viewname LIKE '%_vw_daily_best')
+      AND (viewname = 'vw_daily_best' OR viewname LIKE '%_vw_daily_best')
     """
     with _conn() as conn:
         rows = conn.execute(text(sql)).mappings().all()
@@ -59,7 +59,7 @@ def _extract_models(views) -> List[str]:
     models = set()
     for v in views:
         name = v["viewname"]
-        if name == "tsf_vw_daily_best":
+        if name == "vw_daily_best":
             continue
         if name.endswith("_vw_daily_best"):
             base = name[: -len("_vw_daily_best")]
@@ -73,9 +73,9 @@ def _extract_models(views) -> List[str]:
 def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
     s = (scope or "").lower()
     if s == "global":
-        if not _exists(views, "tsf_vw_daily_best"):
+        if not _exists(views, "vw_daily_best"):
             raise HTTPException(404, "Global view not found")
-        return "engine.tsf_vw_daily_best"
+        return "engine.vw_daily_best"
     if s == "per_model":
         if not model:
             raise HTTPException(400, "Model required for per_model")
@@ -324,8 +324,8 @@ def meta():
             row = conn.execute(text(sql)).mappings().first()
             return str(row["forecast_id"]) if row and row.get("forecast_id") else None
 
-    if _exists(views, "tsf_vw_daily_best"):
-        rid = fetch_recent("engine.tsf_vw_daily_best")
+    if _exists(views, "vw_daily_best"):
+        rid = fetch_recent("engine.vw_daily_best")
         if rid:
             most_recent["global||"] = rid
     for m in models:
