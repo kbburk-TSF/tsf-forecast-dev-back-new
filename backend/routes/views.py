@@ -1,8 +1,10 @@
 
 # backend/routes/views.py
-# Version: 2025-09-23 v3.2 (psycopg-only)
-# Change: /views/query now accepts both POST and GET to avoid client-method mismatches.
-#         Uses same SQL as before, pulling rows from resolved view.
+# Version: 2025-09-23 v3.3 (psycopg-only)
+# Fix: Correct per-table series mapping -> table suffix
+#   UI shows S / SQ / SQM (we also accept MS as alias of S).
+#   Mapping: S|MS -> ms, SQ -> msq, SQM -> msqm
+
 from typing import Optional, Dict, List
 from fastapi import APIRouter, HTTPException, Query as FQuery, Request
 from fastapi.responses import HTMLResponse
@@ -50,12 +52,19 @@ def _extract_models(views) -> List[str]:
             continue
         if name.endswith("_vw_daily_best"):
             base = name[: -len("_vw_daily_best")]
-            for sfx in ("_instance_forecast_s", "_instance_forecast_ms", "_instance_forecast_msq", "_instance_forecast_msqm"):
+            for sfx in ("_instance_forecast_ms", "_instance_forecast_msq", "_instance_forecast_msqm"):
                 if base.endswith(sfx):
                     base = base[: -len(sfx)]
                     break
             models.add(base)
     return sorted(models)
+
+_SERIES_MAP = {
+    "s": "ms",
+    "ms": "ms",
+    "sq": "msq",
+    "sqm": "msqm"
+}
 
 def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
     s = (scope or "").lower()
@@ -73,10 +82,11 @@ def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views
     if s == "per_table":
         if not (model and series):
             raise HTTPException(400, "Model and series required for per_table")
-        ser = (series or "").lower()
-        if ser not in ("s","ms","sq","sqm"):
-            raise HTTPException(400, "Series must be S/MS/SQ/SQM")
-        name = f"{model}_instance_forecast_{ser}_vw_daily_best"
+        key = (series or "").lower()
+        suff = _SERIES_MAP.get(key)
+        if not suff:
+            raise HTTPException(400, "Series must be S, SQ, or SQM")
+        name = f"{model}_instance_forecast_{suff}_vw_daily_best"
         if not _exists(views, name):
             raise HTTPException(404, f"Per-table view not found: {name}")
         return f"engine.{name}"
@@ -118,7 +128,7 @@ def views_form():
 
       <div class="row">
         <div><label>Model</label><select id="model"></select></div>
-        <div id="seriesWrap"><label>Series</label><select id="series"><option>S</option><option>MS</option><option>SQ</option><option>SQM</option></select></div>
+        <div id="seriesWrap"><label>Series</label><select id="series"><option>S</option><option>SQ</option><option>SQM</option></select></div>
         <div><label>Forecast</label><select id="fid"></select></div>
         <div><label>Date Window</label>
           <select id="preset">
@@ -168,12 +178,7 @@ def views_form():
         return r.json();
       }
       async function query(payload){
-        // Try POST first; if 404, fallback to GET
-        let r = await fetch('/views/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-        if(r.status === 404) {
-          const q = new URLSearchParams(payload);
-          r = await fetch('/views/query?' + q.toString());
-        }
+        const r = await fetch('/views/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
         if(!r.ok) throw new Error('query ' + r.status);
         return r.json();
       }
@@ -272,7 +277,7 @@ def views_form():
         try{
           const res = await query(payload);
           renderHead(); renderRows(res.rows || []);
-          el('csv').disabled = !(res.rows && res.rows.length);
+          el('csv').disabled = !(res.rows && res.length);
           setStatus(String((res.rows||[]).length) + ' / ' + String(res.total) + ' rows');
         }catch(e){
           setStatus('Query failed: ' + e.message);
@@ -304,7 +309,7 @@ def meta_form():
         with _connect() as conn:
             views = _discover_views(conn)
             models = _extract_models(views)
-            return {"scopes":["per_table","per_model","global"], "models":models, "series":["S","MS","SQ","SQM"], "most_recent": {}}
+            return {"scopes":["per_table","per_model","global"], "models":models, "series":["S","SQ","SQM"], "most_recent": {}}
     except Exception as e:
         return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "meta_form"}
 
@@ -334,45 +339,25 @@ class ViewsQueryBody(BaseModel):
     page: int = 1
     page_size: int = 2000
 
-@router.api_route("/query", methods=["POST","GET"])
-async def run_query(request: Request, body: Optional[ViewsQueryBody] = None):
-    # Accept JSON (POST) or querystring (GET) for robustness
-    if request.method == "GET":
-        q = request.query_params
-        payload = ViewsQueryBody(
-            scope=q.get("scope",""),
-            model=q.get("model"),
-            series=q.get("series"),
-            forecast_id=q.get("forecast_id",""),
-            date_from=q.get("date_from"),
-            date_to=q.get("date_to"),
-            page=int(q.get("page","1") or 1),
-            page_size=int(q.get("page_size","2000") or 2000),
-        )
-    else:
-        if body is None:
-            data = await request.json()
-            payload = ViewsQueryBody(**data)
-        else:
-            payload = body
-
-    if not payload.forecast_id:
+@router.post("/query")
+def run_query(body: ViewsQueryBody):
+    if not body.forecast_id:
         raise HTTPException(400, "forecast_id required")
 
-    limit = max(1, min(10000, int(payload.page_size or 2000)))
-    offset = max(0, (max(1, int(payload.page or 1))-1) * limit)
+    limit = max(1, min(10000, int(body.page_size or 2000)))
+    offset = max(0, (max(1, int(body.page or 1))-1) * limit)
 
     with _connect() as conn:
         views = _discover_views(conn)
-        vname = _resolve_view(payload.scope, payload.model, payload.series, views)
+        vname = _resolve_view(body.scope, body.model, body.series, views)
         where = ["forecast_id = %s"]
-        params = [payload.forecast_id]
-        if payload.date_from:
+        params = [body.forecast_id]
+        if body.date_from:
             where.append("date >= %s")
-            params.append(payload.date_from)
-        if payload.date_to:
+            params.append(body.date_from)
+        if body.date_to:
             where.append("date <= %s")
-            params.append(payload.date_to)
+            params.append(body.date_to)
         where_sql = " AND ".join(where)
 
         cols = "date, value, fv_l, fv, fv_u, fv_mean_mae, fv_interval_odds, fv_interval_sig, fv_variance_mean, fv_mean_mae_c"
