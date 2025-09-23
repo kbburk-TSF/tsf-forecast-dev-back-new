@@ -44,7 +44,7 @@ def _conn():
 def _discover_views() -> List[Dict[str,str]]:
     sql = """
     SELECT schemaname, viewname
-    FROM pg_catalog.
+    FROM pg_catalog.pg_views
     WHERE schemaname='engine'
       AND (viewname = 'tsf_vw_daily_best' OR viewname LIKE '%_vw_daily_best')
     """

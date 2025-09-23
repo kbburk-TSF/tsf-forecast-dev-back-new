@@ -68,11 +68,11 @@ def get_views_meta():
                     "error": str(e), "sqlstate": getattr(e,"sqlstate",None), "trace": traceback.format_exc()
                 })
 
-            # 3) Confirm target views exist & are readable (engine/ vw_daily_best)
+            # 3) Confirm target views exist & are readable (engine/pg_views vw_daily_best)
             try:
                 # existence + privs checks
                 checks = []
-                for schema, name in [("engine","vw_daily_best"), ("","vw_daily_best")]:
+                for schema, name in [("engine","vw_daily_best"), ("pg_views","vw_daily_best")]:
                     _ = _fetch_one(cur, """
                         select
                           exists (
@@ -88,8 +88,8 @@ def get_views_meta():
                 # Try minimal selects, capture the first failure
                 samples = []
                 for lbl, sql in [
-                    ("engine_vw", "select * from engine.tsf_vw_daily_best limit 1"),
-                    ("_vw", "select * from .vw_daily_best limit 1"),
+                    ("engine_vw", "select * from engine.vw_daily_best limit 1"),
+                    ("pg_views_vw", "select * from pg_views.vw_daily_best limit 1"),
                 ]:
                     try:
                         rows = _fetch_all(cur, sql)

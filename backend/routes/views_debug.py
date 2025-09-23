@@ -61,7 +61,7 @@ def check(schema: str, name: str) -> Dict[str, Any]:
 def probe_diagnose() -> Dict[str, Any]:
     checks: List[Dict[str, Any]] = [
         check("engine", "vw_daily_best"),
-        check("", "vw_daily_best"),
+        check("pg_views", "vw_daily_best"),
     ]
     ok = all(c.get("exists") and c.get("has_select") for c in checks if c.get("error") is None)
     return {"ok": ok, "step": "privileges", "details": {"checks": checks}}
