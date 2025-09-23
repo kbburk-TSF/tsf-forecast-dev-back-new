@@ -1,6 +1,11 @@
 
 # backend/routes/views.py
-# Purpose: Views API + HTML form (NO /views/meta endpoint to avoid collision with views_meta_debug.py)
+# Version: 2025-09-23 v2.0
+# Purpose: Views API + HTML form. Uses internal /views/meta_form (no collision with /views/meta debug).
+# Notes:
+# - Columns aligned with TSF views (no created_at, no model_name/series/season/fmsr_series in projections).
+# - IDs endpoint orders by MAX(date) since views do not expose created_at.
+
 from typing import Optional, Dict, List
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -156,12 +161,12 @@ def views_form():
     <script>
       const SCOPE = () => document.querySelector('input[name="scope"]:checked').value;
       const el = (id) => document.getElementById(id);
-      const HEADERS = ["date","value","fv_l","fv","fv_u","fv_mean_mae","fv_interval_odds","fv_interval_sig","fv_variance_mean","fv_mean_mae_c","model_name","series","season","fmsr_series"];
+      const HEADERS = ["date","value","fv_l","fv","fv_u","fv_mean_mae","fv_interval_odds","fv_interval_sig","fv_variance_mean","fv_mean_mae_c"];
 
       function setStatus(msg){ el('status').textContent = msg; }
 
       async function meta(){
-        const r = await fetch('/views/meta');
+        const r = await fetch('/views/meta_form'); // internal meta for this page
         if(!r.ok) throw new Error('meta ' + r.status);
         return r.json();
       }
@@ -245,15 +250,15 @@ def views_form():
       function currentRange(){
         const p = el('preset').value;
         if(p === 'custom'){
-          return {from: el('from').value || null, to: el('to').value || null};
+          return {date_from: el('from').value || null, date_to: el('to').value || null};
         }
-        if(p === 'all') return {from:null,to:null};
+        if(p === 'all') return {date_from:null,date_to:null};
         const days = parseInt(p,10) || 90;
         const d = new Date();
-        const to = d.toISOString().slice(0,10);
+        const date_to = d.toISOString().slice(0,10);
         d.setDate(d.getDate() - days);
-        const from = d.toISOString().slice(0,10);
-        return {from,to};
+        const date_from = d.toISOString().slice(0,10);
+        return {date_from, date_to};
       }
 
       async function doLoad(){
@@ -297,6 +302,39 @@ def views_form():
     """
     return HTMLResponse(content=html)
 
+@router.get("/meta_form")
+def meta_form():
+    views = _discover_views()
+    models = _extract_models(views)
+
+    # most recent by MAX(date) (views do not expose created_at)
+    most_recent = {}
+    def fetch_recent(vname: str):
+        sql = f"SELECT forecast_id FROM {vname} ORDER BY date DESC NULLS LAST LIMIT 1"
+        with _conn() as conn:
+            row = conn.execute(text(sql)).mappings().first()
+            return str(row["forecast_id"]) if row and row.get("forecast_id") else None
+
+    if _exists(views, "tsf_vw_daily_best"):
+        rid = fetch_recent("engine.tsf_vw_daily_best")
+        if rid:
+            most_recent["global||"] = rid
+    for m in models:
+        v = f"engine.{m}_vw_daily_best"
+        if _exists(views, f"{m}_vw_daily_best"):
+            rid = fetch_recent(v)
+            if rid:
+                most_recent[f"per_model|{m}|"] = rid
+    for m in models:
+        for ser in ("s","ms","sq","sqm"):
+            vname = f"{m}_instance_forecast_{ser}_vw_daily_best"
+            if _exists(views, vname):
+                rid = fetch_recent(f"engine.{vname}")
+                if rid:
+                    most_recent[f"per_table|{m}|{ser.upper()}"] = rid
+
+    return {"scopes":["per_table","per_model","global"], "models":models, "series":["S","MS","SQ","SQM"], "most_recent": most_recent}
+
 @router.get("/ids")
 def ids(scope: str = Query(...), model: Optional[str] = None, series: Optional[str] = None, limit: int = 100):
     views = _discover_views()
@@ -304,7 +342,7 @@ def ids(scope: str = Query(...), model: Optional[str] = None, series: Optional[s
     sql = f"""
     SELECT fr.forecast_id AS id, COALESCE(fr.forecast_name, fr.forecast_id::text) AS name, x.mc
     FROM (
-      SELECT forecast_id, MAX(created_at) AS mc
+      SELECT forecast_id, MAX(date) AS mc
       FROM {vname}
       GROUP BY forecast_id
     ) x
@@ -344,7 +382,7 @@ def query(body: ViewsQueryBody):
     limit = max(1, min(10000, int(body.page_size or 2000)))
     offset = max(0, (max(1, int(body.page or 1))-1) * limit)
 
-    cols = "date, value, fv_l, fv, fv_u, fv_mean_mae, fv_interval_odds, fv_interval_sig, fv_variance_mean, fv_mean_mae_c, model_name, series, season, fmsr_series, created_at"
+    cols = "date, value, fv_l, fv, fv_u, fv_mean_mae, fv_interval_odds, fv_interval_sig, fv_variance_mean, fv_mean_mae_c"
     sql = f"SELECT {cols} FROM {vname} WHERE {where_sql} ORDER BY date ASC LIMIT :lim OFFSET :off"
     cnt = f"SELECT COUNT(*) AS n FROM {vname} WHERE {where_sql}"
     with _conn() as conn:
