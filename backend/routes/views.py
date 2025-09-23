@@ -1,7 +1,7 @@
-
 # backend/routes/views.py
 # Read-only Views API + simple HTML form.
 # Uses ONLY TSF_ENGINE_APP for DB access.
+# Forecast picker shows forecast_name but submits forecast_id.
 
 from typing import Optional, Dict, List
 from fastapi import APIRouter, HTTPException, Query
@@ -90,7 +90,6 @@ def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views
 
 @router.get("/", response_class=HTMLResponse)
 def views_form():
-    # Minimal, dependency-free HTML page to inspect the views.
     html = """
 <!doctype html>
 <html>
@@ -111,6 +110,7 @@ def views_form():
       th, td { border-bottom:1px solid var(--border); padding:8px 10px; text-align:left; }
       thead th { position:sticky; top:0; background:var(--card); }
       .scope { display:flex; gap:16px; }
+      .err { color:#b00020; }
     </style>
   </head>
   <body>
@@ -125,7 +125,7 @@ def views_form():
       <div class="row">
         <div><label>Model</label><select id="model"></select></div>
         <div id="seriesWrap"><label>Series</label><select id="series"><option>S</option><option>MS</option><option>SQ</option><option>SQM</option></select></div>
-        <div><label>Forecast ID</label><select id="fid"></select></div>
+        <div><label>Forecast</label><select id="fid"></select></div>
         <div><label>Date Window</label>
           <select id="preset">
             <option value="30">Last 30 days</option>
@@ -171,7 +171,7 @@ def views_form():
         const q = new URLSearchParams({scope, model: model||'', series: series||''});
         const r = await fetch('/views/ids?' + q.toString());
         if(!r.ok) throw new Error('ids ' + r.status);
-        return r.json();
+        return r.json(); // [{id, name}]
       }
       async function query(payload){
         const r = await fetch('/views/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
@@ -179,7 +179,19 @@ def views_form():
         return r.json();
       }
 
-      function fillSelect(sel, vals, firstLabel){
+      function fillSelectPairs(sel, pairs){
+        sel.innerHTML = '';
+        if(!pairs || !pairs.length){
+          const o = document.createElement('option'); o.textContent = '(none)'; o.value=''; sel.appendChild(o);
+          return;
+        }
+        pairs.forEach(({id, name}) => {
+          const o = document.createElement('option');
+          o.value = id; o.textContent = name || id;
+          sel.appendChild(o);
+        });
+      }
+      function fillSelect(sel, vals){
         sel.innerHTML = '';
         if(!vals || !vals.length){
           const o = document.createElement('option'); o.textContent = '(none)'; o.value=''; sel.appendChild(o);
@@ -224,11 +236,11 @@ def views_form():
         const series = (scope === 'per_table') ? el('series').value : '';
         try{
           const list = await ids(scope, model, series);
-          fillSelect(el('fid'), list);
-          setStatus((list.length ? 'Pick a forecast and Load' : 'No forecast_ids for this selection'));
+          fillSelectPairs(el('fid'), list);
+          setStatus((list.length ? 'Pick a forecast and Load' : 'No forecasts for this selection'));
         }catch(e){
           setStatus('IDs load failed: ' + e.message);
-          fillSelect(el('fid'), []);
+          fillSelectPairs(el('fid'), []);
         }
       }
 
@@ -256,13 +268,13 @@ def views_form():
           ...currentRange(),
           page: 1, page_size: 2000
         };
-        if(!payload.forecast_id){ setStatus('Select a forecast_id first'); return; }
+        if(!payload.forecast_id){ setStatus('Select a forecast first'); return; }
         setStatus('Loading…');
         try{
           const res = await query(payload);
           renderHead(); renderRows(res.rows || []);
           el('csv').disabled = !(res.rows && res.rows.length);
-          setStatus(`${(res.rows||[]).length} / ${res.total} rows`);
+          setStatus(f"{(res.rows||[]).length} / {res.total} rows");  # noqa: E999
         }catch(e){
           setStatus('Query failed: ' + e.message);
         }
@@ -299,7 +311,6 @@ def meta():
     views = _discover_views()
     models = _extract_models(views)
     most_recent = {}
-    # Try to fetch one recent id per scope/model/series (optional for the form)
     def fetch_recent(vname: str):
         sql = f"SELECT forecast_id FROM {vname} ORDER BY created_at DESC NULLS LAST LIMIT 1"
         with _conn() as conn:
@@ -331,18 +342,19 @@ def ids(scope: str = Query(...), model: Optional[str] = None, series: Optional[s
     views = _discover_views()
     vname = _resolve_view(scope, model, series, views)
     sql = f"""
-    SELECT forecast_id
+    SELECT fr.forecast_id AS id, COALESCE(fr.forecast_name, fr.forecast_id::text) AS name, x.mc
     FROM (
       SELECT forecast_id, MAX(created_at) AS mc
       FROM {vname}
       GROUP BY forecast_id
     ) x
-    ORDER BY mc DESC NULLS LAST
+    JOIN engine.forecast_registry fr ON fr.forecast_id = x.forecast_id
+    ORDER BY x.mc DESC NULLS LAST
     LIMIT :lim
     """
     with _conn() as conn:
-        vals = conn.execute(text(sql), {"lim": limit}).scalars().all()
-    return [str(v) for v in vals if v]
+        rows = conn.execute(text(sql), {"lim": limit}).mappings().all()
+    return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
 
 class ViewsQueryBody(BaseModel):
     scope: str
