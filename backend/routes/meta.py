@@ -1,50 +1,63 @@
+import os
+from typing import Dict, List
+
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import text
-def _db_url() -> str:
-    url = os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("ENGINE_DATABASE_URL") or os.getenv("DATABASE_URL")
-    if not url:
-    raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
-    return url
-    import psycopg
-    from psycopg.rows import dict_row
-    router = APIRouter(prefix="/data", tags=["metadata"])
-    DB_SCHEMA_MAP = {
+import psycopg
+from psycopg.rows import tuple_row
+
+router = APIRouter(prefix="/data", tags=["metadata"])
+
+# Map of known data sources to their tables and columns
+DB_SCHEMA_MAP: Dict[str, Dict[str, object]] = {
     "air_quality_demo_data": {
-    "table": "air_quality_raw",
-    "target_col": "Parameter Name",
-    "value_col": "Arithmetic Mean",
-    "filters": ["State Name", "County Name", "City Name", "CBSA Name"],
-    }
-    }
-def _get_schema(db: str):
+        "table": "air_quality_raw",
+        "target_col": "Parameter Name",
+        "value_col": "Arithmetic Mean",
+        "filters": ["State Name", "County Name", "City Name", "CBSA Name"],
+    },
+}
+
+def _db_url() -> str:
+    """
+    Resolve the database URL from environment variables.
+    Keep the original precedence used elsewhere in the codebase.
+    """
+    url = (
+        os.getenv("ENGINE_DATABASE_URL_DIRECT")
+        or os.getenv("ENGINE_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+    )
+    if not url:
+        raise RuntimeError("ENGINE_DATABASE_URL_DIRECT is not set")
+    return url
+
+@router.get("/filters")
+def get_filters(
+    db: str = Query(..., description="Key in DB_SCHEMA_MAP, e.g. 'air_quality_demo_data'"),
+    target: str = Query(..., description="Target/parameter name to filter on"),
+) -> Dict[str, object]:
+    """
+    Return distinct values for each configured filter column given a target.
+    """
     if db not in DB_SCHEMA_MAP:
-    raise HTTPException(status_code=404, detail=f"Unknown database {db}")
-    return DB_SCHEMA_MAP[db]
-    @router.get("/{db}/targets")
-def get_targets(db: str):
-    meta = _get_schema(db)
-    table = f"{db}.{meta['table']}"
+        raise HTTPException(status_code=400, detail=f"Unknown db '{db}'")
+
+    meta = DB_SCHEMA_MAP[db]
+    table = meta["table"]
     target_col = meta["target_col"]
-    sql = f'SELECT DISTINCT "{target_col}" as target FROM {table} ORDER BY "{target_col}"'
-    with psycopg.connect(_db_url(), autocommit=True) as conn:
-    cur = conn.cursor(row_factory=dict_row)
-    return {"targets": [r["target"] for r in rows]}
-    @router.get("/{db}/filters")
-def get_filters(db: str, target: str = Query(...)):
-    meta = _get_schema(db)
-    table = f"{db}.{meta['table']}"
-    target_col = meta["target_col"]
-    filters = {}
-    with psycopg.connect(_db_url(), autocommit=True) as conn:
-    cur = conn.cursor(row_factory=dict_row)
-    with conn.cursor(row_factory=dict_row) as cur:
-    for fcol in meta["filters"]:
-    sql = f'''
-    SELECT DISTINCT "{fcol}" as val
-    FROM {table}
-    WHERE "{target_col}" = :target
-    ORDER BY "{fcol}"
-    '''
-    vals = cur.execute(text(sql), {"target": target}).scalars().all()
-    filters[fcol] = [v for v in vals if v is not None]
+    filters: Dict[str, List[str]] = {}
+
+    # Build and execute queries safely with parameters. Identifiers are whitelisted from the map.
+    sql_template = 'SELECT DISTINCT "{fcol}" AS val FROM {table} WHERE "{tcol}" = %(target)s ORDER BY "{fcol}"'
+
+    dsn = _db_url()
+    # autocommit=True to avoid transaction overhead for simple reads
+    with psycopg.connect(dsn, autocommit=True, row_factory=tuple_row) as conn:
+        with conn.cursor() as cur:
+            for fcol in meta["filters"]:
+                sql = sql_template.format(fcol=fcol, table=table, tcol=target_col)
+                cur.execute(sql, {"target": target})
+                vals = [row[0] for row in cur.fetchall() if row and row[0] is not None]
+                filters[fcol] = vals
+
     return {"target": target, "filters": filters}
