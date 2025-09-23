@@ -100,7 +100,7 @@ def mount_all_route_modules() -> None:
 mount_all_route_modules()
 
 # ---------- Meta endpoints ----------
-@app.get("/", tags=["meta"])
+@app.api_route("/", methods=["GET","HEAD"], tags=["meta"])
 def root():
     return {
         "ok": True,
