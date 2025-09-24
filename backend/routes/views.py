@@ -32,8 +32,11 @@ def _discover_views(conn) -> List[Dict[str,str]]:
     SELECT schemaname, viewname
     FROM pg_catalog.pg_views
     WHERE schemaname='engine'
-      AND (viewname = 'tsf_vw_daily_best' OR viewname LIKE '%_vw_daily_best')
-    """
+      AND viewname IN ('tsf_vw_full',
+                       'tsf_vw_daily_best_arima_a0',
+                       'tsf_vw_daily_best_ses_a0',
+                       'tsf_vw_daily_best_hwes_a0')
+    """""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql)
         rows = cur.fetchall()
@@ -67,29 +70,10 @@ _SERIES_MAP = {
 
 def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
     s = (scope or "").lower()
-    if s == "global":
-        if not _exists(views, "tsf_vw_daily_best"):
-            raise HTTPException(404, "Global view not found")
-        return "engine.tsf_vw_daily_best"
-    if s == "per_model":
-        if not model:
-            raise HTTPException(400, "Model required for per_model")
-        name = f"{model}_vw_daily_best"
-        if not _exists(views, name):
-            raise HTTPException(404, f"Per-model view not found: {name}")
-        return f"engine.{name}"
-    if s == "per_table":
-        if not (model and series):
-            raise HTTPException(400, "Model and series required for per_table")
-        key = (series or "").lower()
-        suff = _SERIES_MAP.get(key)
-        if not suff:
-            raise HTTPException(400, "Series must be S, SQ, or SQM")
-        name = f"{model}_instance_forecast_{suff}_vw_daily_best"
-        if not _exists(views, name):
-            raise HTTPException(404, f"Per-table view not found: {name}")
-        return f"engine.{name}"
-    raise HTTPException(400, "Invalid scope")
+    # All per-forecast queries go to the pre-baked global full view in V11_14
+    if not any(v["schemaname"] == "engine" and v["viewname"] == "tsf_vw_full" for v in views):
+        raise HTTPException(404, "V11_14 view engine.tsf_vw_full not found")
+    return "engine.tsf_vw_full"
 
 @router.get("/", response_class=HTMLResponse)
 def views_form():
@@ -372,19 +356,17 @@ def run_query(body: ViewsQueryBody):
     with _connect() as conn:
         views = _discover_views(conn)
         vname = _resolve_view(body.scope, body.model, body.series, views)
-        where = ["forecast_id = %s"]
-        params = [body.forecast_id]
-        if body.date_from:
-            where.append("date >= %s")
-            params.append(body.date_from)
-        if body.date_to:
-            where.append("date <= %s")
-            params.append(body.date_to)
-        where_sql = " AND ".join(where)
+        where = []  # no direct use; building params only
+params = [body.forecast_id]
+if body.date_from:
+    params.append(body.date_from)
+if body.date_to:
+    params.append(body.date_to)
+where_sql = ''
 
         cols = "date, value, fv_l, fv, fv_u, fv_mean_mae, fv_interval_odds, fv_interval_sig, fv_variance_mean, fv_mean_mae_c"
-        sql = f"SELECT {cols} FROM {vname} WHERE {where_sql} ORDER BY date ASC LIMIT %s OFFSET %s"
-        cnt = f"SELECT COUNT(*) AS n FROM {vname} WHERE {where_sql}"
+sql = f"SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE fr.forecast_id = %s" + (" AND " + " AND ".join([w for w in ["date >= %s" if body.date_from else None, "date <= %s" if body.date_to else None] if w]) if (body.date_from or body.date_to) else "") + " ORDER BY date ASC LIMIT %s OFFSET %s"
+cnt = f"SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE fr.forecast_id = %s" + (" AND " + " AND ".join([w for w in ["date >= %s" if body.date_from else None, "date <= %s" if body.date_to else None] if w]) if (body.date_from or body.date_to) else "")
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(cnt, params)
             total = int(cur.fetchone()["n"])
@@ -399,18 +381,20 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
     with _connect() as conn:
         views = _discover_views(conn)
         vname = _resolve_view(scope, model, series, views)
-        where = ["forecast_id = %s"]
-        params = [forecast_id]
-        if date_from:
-            where.append("date >= %s")
-            params.append(date_from)
-        if date_to:
-            where.append("date <= %s")
-            params.append(date_to)
-        where_sql = " AND ".join(where)
+        where = []  # no direct use; building params only
+params = [body.forecast_id]
+if body.date_from:
+    params.append(body.date_from)
+if body.date_to:
+    params.append(body.date_to)
+where_sql = ''
 
         cols = ["date","value","fv_l","fv","fv_u","fv_mean_mae","fv_interval_odds","fv_interval_sig","fv_variance_mean","fv_mean_mae_c"]
-        sql = f"SELECT {', '.join(cols)} FROM {vname} WHERE {where_sql} ORDER BY date ASC"
+base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE fr.forecast_id = %s"
+conds = []
+if date_from: conds.append("date >= %s")
+if date_to: conds.append("date <= %s")
+sql = f"SELECT {', '.join(cols)} " + base + (" AND " + " AND ".join(conds) if conds else "") + " ORDER BY date ASC"
 
         def row_iter():
             yield (",".join(cols) + "\n").encode("utf-8")

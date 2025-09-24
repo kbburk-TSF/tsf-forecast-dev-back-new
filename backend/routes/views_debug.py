@@ -57,7 +57,7 @@ def check(schema: str, name: str) -> Dict[str, Any]:
 @router.get("/diagnose")
 def probe_diagnose() -> Dict[str, Any]:
     checks: List[Dict[str, Any]] = [
-        check("engine", "tsf_vw_daily_best"),
+        check("engine", "tsf_vw_full"),
     ]
     ok = all(c.get("exists") and c.get("has_select") for c in checks if c.get("error") is None)
     return {"ok": ok, "step": "privileges", "details": {"checks": checks}}
