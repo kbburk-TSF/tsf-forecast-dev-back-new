@@ -1,13 +1,16 @@
 
 # backend/routes/views.py
-# Version: 2025-09-23 v4.0 (psycopg-only)
-# Adds: /views/export (CSV download for the full table view, no pagination).
+# Version: 2025-09-24 v4.1 (V11_14 views, fixed indentation)
+# Notes:
+# - Routes target engine.tsf_vw_full (pre-baked cache view from V11_14).
+# - Since the view hides forecast_id, filtering joins forecast_registry on forecast_name.
+# - Columns returned are unchanged from the UI expectations.
+# - Fixed indentation and parameter ordering.
 
 from typing import Optional, Dict, List
-from fastapi import APIRouter, HTTPException, Query as FQuery, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, Response
-from pydantic import BaseModel
-import os, traceback, io, csv, datetime as dt
+from fastapi import APIRouter, HTTPException, Query as FQuery
+from fastapi.responses import HTMLResponse, StreamingResponse
+import os, traceback, datetime as dt
 import psycopg
 from psycopg.rows import dict_row
 
@@ -36,7 +39,7 @@ def _discover_views(conn) -> List[Dict[str,str]]:
                        'tsf_vw_daily_best_arima_a0',
                        'tsf_vw_daily_best_ses_a0',
                        'tsf_vw_daily_best_hwes_a0')
-    """""
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql)
         rows = cur.fetchall()
@@ -46,11 +49,10 @@ def _exists(views, name: str) -> bool:
     return any(v["schemaname"] == "engine" and v["viewname"] == name for v in views)
 
 def _extract_models(views) -> List[str]:
+    # Kept for UI parity; may be empty for your current setup.
     models = set()
     for v in views:
         name = v["viewname"]
-        if name == "tsf_vw_daily_best":
-            continue
         if name.endswith("_vw_daily_best"):
             base = name[: -len("_vw_daily_best")]
             for sfx in ("_instance_forecast_ms", "_instance_forecast_msq", "_instance_forecast_msqm"):
@@ -60,18 +62,9 @@ def _extract_models(views) -> List[str]:
             models.add(base)
     return sorted(models)
 
-# Correct series mapping based on your schema
-_SERIES_MAP = {
-    "s": "ms",
-    "ms": "ms",
-    "sq": "msq",
-    "sqm": "msqm"
-}
-
 def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
-    s = (scope or "").lower()
-    # All per-forecast queries go to the pre-baked global full view in V11_14
-    if not any(v["schemaname"] == "engine" and v["viewname"] == "tsf_vw_full" for v in views):
+    # Everything routes to the global pre-baked full view
+    if not _exists(views, "tsf_vw_full"):
         raise HTTPException(404, "V11_14 view engine.tsf_vw_full not found")
     return "engine.tsf_vw_full"
 
@@ -183,7 +176,7 @@ def views_form():
       function fillSelect(sel, vals){
         sel.innerHTML = '';
         if(!vals || !vals.length){
-        const o = document.createElement('option'); o.textContent = '(none)'; o.value=''; sel.appendChild(o);
+          const o = document.createElement('option'); o.textContent = '(none)'; o.value=''; sel.appendChild(o);
           return;
         }
         vals.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o); });
@@ -335,6 +328,8 @@ def ids(scope: str = FQuery(...), model: Optional[str] = None, series: Optional[
     except Exception as e:
         return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "ids"}
 
+from pydantic import BaseModel
+
 class ViewsQueryBody(BaseModel):
     scope: str
     model: Optional[str] = None
@@ -356,22 +351,28 @@ def run_query(body: ViewsQueryBody):
     with _connect() as conn:
         views = _discover_views(conn)
         vname = _resolve_view(body.scope, body.model, body.series, views)
-        where = []  # no direct use; building params only
-params = [body.forecast_id]
-if body.date_from:
-    params.append(body.date_from)
-if body.date_to:
-    params.append(body.date_to)
-where_sql = ''
+
+        # Build dynamic conditions and parameters
+        conds = ["fr.forecast_id = %s"]
+        params = [body.forecast_id]
+        if body.date_from:
+            conds.append("v.date >= %s")
+            params.append(body.date_from)
+        if body.date_to:
+            conds.append("v.date <= %s")
+            params.append(body.date_to)
 
         cols = "date, value, fv_l, fv, fv_u, fv_mean_mae, fv_interval_odds, fv_interval_sig, fv_variance_mean, fv_mean_mae_c"
-sql = f"SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE fr.forecast_id = %s" + (" AND " + " AND ".join([w for w in ["date >= %s" if body.date_from else None, "date <= %s" if body.date_to else None] if w]) if (body.date_from or body.date_to) else "") + " ORDER BY date ASC LIMIT %s OFFSET %s"
-cnt = f"SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE fr.forecast_id = %s" + (" AND " + " AND ".join([w for w in ["date >= %s" if body.date_from else None, "date <= %s" if body.date_to else None] if w]) if (body.date_from or body.date_to) else "")
+        where_clause = " AND ".join(conds)
+        sql = f"SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s"
+        cnt = f"SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}"
+
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(cnt, params)
             total = int(cur.fetchone()["n"])
             cur.execute(sql, params + [limit, offset])
             rows = cur.fetchall()
+
     return {"rows": rows, "total": total}
 
 @router.get("/export")
@@ -381,20 +382,19 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
     with _connect() as conn:
         views = _discover_views(conn)
         vname = _resolve_view(scope, model, series, views)
-        where = []  # no direct use; building params only
-params = [body.forecast_id]
-if body.date_from:
-    params.append(body.date_from)
-if body.date_to:
-    params.append(body.date_to)
-where_sql = ''
+
+        conds = ["fr.forecast_id = %s"]
+        params = [forecast_id]
+        if date_from:
+            conds.append("v.date >= %s")
+            params.append(date_from)
+        if date_to:
+            conds.append("v.date <= %s")
+            params.append(date_to)
 
         cols = ["date","value","fv_l","fv","fv_u","fv_mean_mae","fv_interval_odds","fv_interval_sig","fv_variance_mean","fv_mean_mae_c"]
-base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE fr.forecast_id = %s"
-conds = []
-if date_from: conds.append("date >= %s")
-if date_to: conds.append("date <= %s")
-sql = f"SELECT {', '.join(cols)} " + base + (" AND " + " AND ".join(conds) if conds else "") + " ORDER BY date ASC"
+        base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
+        sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
 
         def row_iter():
             yield (",".join(cols) + "\n").encode("utf-8")
