@@ -126,7 +126,7 @@ def views_form():
       // Preserve backend contracts; single-scope constant
       const SCOPE = () => 'global';
       const el = (id) => document.getElementById(id);
-      const HEADERS = ["date","value","arima_m","hwes_m","ses_m","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_mean_mape_c","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","low","high"];
+      const HEADERS = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_mean_mape_c","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","low","high"];
 
       function setStatus(msg){ el('status').textContent = msg; }
 
@@ -268,8 +268,8 @@ def run_query(body: ViewsQueryBody):
             conds.append("v.date <= %s")
             params.append(body.date_to)
 
-        # ADDED: arima_m, hwes_m, ses_m directly after value
-        cols = "date, value, arima_m, hwes_m, ses_m, model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high"
+        # ADDED: ARIMA_M, HWES_M, SES_M directly after value
+        cols = "date, value, ARIMA_M, HWES_M, SES_M, model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high"
         where_clause = " AND ".join(conds)
         sql = f"SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s"
         cnt = f"SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}"
@@ -299,8 +299,8 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
             conds.append("v.date <= %s")
             params.append(date_to)
 
-        # ADDED: arima_m, hwes_m, ses_m in CSV header
-        cols = ["date","value","arima_m","hwes_m","ses_m","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
+        # ADDED: ARIMA_M, HWES_M, SES_M in CSV header
+        cols = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
         base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
         sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
 
