@@ -119,3 +119,10 @@ def health():
         return {"ok": True, "database": "connected"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- explicit include for arima view (safe even with auto-loader) ---
+try:
+    from backend.routes import arima as _arima
+    app.include_router(_arima.router)
+except Exception as _e:
+    log.error(f"Failed to include arima routes explicitly: {_e}")
