@@ -1,10 +1,8 @@
 # backend/routes/views.py
 # Version: 2025-09-24 v4.1 (V11_14 views, fixed indentation)
-# Notes:
-# - Routes target engine.tsf_vw_full (pre-baked cache view from V11_14).
-# - Since the view hides forecast_id, filtering joins forecast_registry on forecast_name.
-# - Columns returned are unchanged from the UI expectations.
-# - Fixed indentation and parameter ordering.
+# Changes in this drop:
+# - Use quoted identifiers "ARIMA_M","HWES_M","SES_M" in SELECT/CSV to match uppercase columns.
+# - Bind date_from/date_to as Python date objects (no date>=text errors).
 
 from typing import Optional, Dict, List
 from fastapi import APIRouter, HTTPException, Query as FQuery
@@ -46,19 +44,6 @@ def _discover_views(conn) -> List[Dict[str,str]]:
 
 def _exists(views, name: str) -> bool:
     return any(v["schemaname"] == "engine" and v["viewname"] == name for v in views)
-
-def _extract_models(views) -> List[str]:
-    models = set()
-    for v in views:
-        name = v["viewname"]
-        if name.endswith("_vw_daily_best"):
-            base = name[: -len("_vw_daily_best")]
-            for sfx in ("_instance_forecast_ms", "_instance_forecast_msq", "_instance_forecast_msqm"):
-                if base.endswith(sfx):
-                    base = base[: -len(sfx)]
-                    break
-            models.add(base)
-    return sorted(models)
 
 def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
     if not _exists(views, "tsf_vw_full"):
@@ -205,16 +190,6 @@ def views_form():
     """
     return HTMLResponse(content=html)
 
-@router.get("/meta_form")
-def meta_form():
-    try:
-        with _connect() as conn:
-            views = _discover_views(conn)
-            models = _extract_models(views)
-            return {"scopes":["per_table","per_model","global"], "models":models, "series":["S","SQ","SQM"], "most_recent": {}}
-    except Exception as e:
-        return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "meta_form"}
-
 @router.get("/ids")
 def ids(scope: str = FQuery(...), model: Optional[str] = None, series: Optional[str] = None, limit: int = 100):
     try:
@@ -243,6 +218,10 @@ class ViewsQueryBody(BaseModel):
     page: int = 1
     page_size: int = 2000
 
+def _d(s: Optional[str]) -> Optional[dt.date]:
+    if not s: return None
+    return dt.date.fromisoformat(s)
+
 @router.post("/query")
 def run_query(body: ViewsQueryBody):
     if not body.forecast_id:
@@ -259,15 +238,15 @@ def run_query(body: ViewsQueryBody):
         params = [body.forecast_id]
         if body.date_from:
             conds.append("v.date >= %s")
-            params.append(body.date_from)
+            params.append(_d(body.date_from))
         if body.date_to:
             conds.append("v.date <= %s")
-            params.append(body.date_to)
+            params.append(_d(body.date_to))
 
-        cols = "date, value, "ARIMA_M", "HWES_M", "SES_M", model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high"
+        cols = 'date, value, "ARIMA_M", "HWES_M", "SES_M", model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high'
         where_clause = " AND ".join(conds)
-        sql = f"SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s"
-        cnt = f"SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}"
+        sql = f'SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s'
+        cnt = f'SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}'
 
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(cnt, params)
@@ -288,19 +267,18 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
         params = [forecast_id]
         if date_from:
             conds.append("v.date >= %s")
-            params.append(date_from)
+            params.append(_d(date_from))
         if date_to:
             conds.append("v.date <= %s")
-            params.append(date_to)
+            params.append(_d(date_to))
 
-        cols = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
-        sql_cols = [f'"{c}"' if c in {"ARIMA_M","HWES_M","SES_M"} else c for c in cols]
-        
+        cols = ['date','value','"ARIMA_M"','"HWES_M"','"SES_M"','model_name','fv_l','fv','fv_u','fv_mean_mape','fv_interval_odds','fv_interval_sig','fv_variance','fv_variance_mean','fv_mean_mape_c','low','high']
         base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
-        sql = f"SELECT {', '.join(sql_cols)} " + base + " ORDER BY date ASC"
+        sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
 
         def row_iter():
-            yield (",".join(cols) + "\\n").encode("utf-8")
+            headers = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
+            yield (",".join(headers) + "\n").encode("utf-8")
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 for rec in cur:
@@ -312,10 +290,10 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
                             line.append(v.isoformat())
                         else:
                             s = str(v)
-                            if any(ch in s for ch in [',','\\n','\"']):
-                                s = '\"' + s.replace('\"','\"\"') + '\"'
+                            if any(ch in s for ch in [',','\n','"']):
+                                s = '"' + s.replace('"','""') + '"'
                             line.append(s)
-                    yield (",".join(line) + "\\n").encode("utf-8")
+                    yield (",".join(line) + "\n").encode("utf-8")
 
         fname_bits = [scope or 'view']
         if model: fname_bits.append(model)
