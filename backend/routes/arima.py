@@ -1,29 +1,13 @@
 # backend/routes/arima.py
 # View Form & API for engine.tsf_vw_daily_best_arima_a0
-# Version: 2025-09-25 v1.0
-#
-# PURPOSE
-# - Serve a simple HTML form to query the ARIMA pre-baked daily-best view.
-# - Provide JSON query + CSV export endpoints that ALWAYS read from
-#   engine.tsf_vw_daily_best_arima_a0 and require forecast_id.
-#
-# CONTRACT
-# - Columns returned match ChartsTab expectations (date, value, fv, etc.).
-# - No low/high computation here; we simply select what's in the view.
-#
-# ROUTES (mounted under /arima)
-#   GET  /arima/              -> HTML form
-#   GET  /arima/ids           -> forecast ids (from engine.forecast_registry)
-#   POST /arima/query         -> JSON rows from engine.tsf_vw_daily_best_arima_a0
-#   GET  /arima/export        -> CSV stream of same query
+# v1.1 — safer column selection (v.*), better error reporting
 
-from typing import Optional, List
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Query as FQuery
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 import os, datetime as dt, traceback
 import psycopg
 from psycopg.rows import dict_row
-from pydantic import BaseModel
 
 VIEW_NAME = "engine.tsf_vw_daily_best_arima_a0"
 
@@ -50,7 +34,7 @@ def arima_form():
 <html>
   <head>
     <meta charset="utf-8">
-    <title>TSF — View ({VIEW_NAME})</title>
+    <title>{VIEW_NAME}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
       body {{ margin:24px; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#111; }}
@@ -64,6 +48,7 @@ def arima_form():
       th, td {{ border:1px solid #e3e6eb; padding:6px 8px; font-size:13px; }}
       th {{ background:#f3f5f8; position: sticky; top: 0; }}
       #tableWrap {{ max-height: 72vh; overflow:auto; }}
+      code {{ background:#eef; padding:2px 4px; border-radius:4px; }}
     </style>
   </head>
   <body>
@@ -90,6 +75,7 @@ def arima_form():
         </div>
       </div>
       <div class="row"><div class="muted" id="status"></div></div>
+      <div id="err" class="muted" style="color:#b00"></div>
       <div id="tableWrap">
         <table>
           <thead><tr id="thead"></tr></thead>
@@ -100,8 +86,10 @@ def arima_form():
 
     <script>
       const el = (id) => document.getElementById(id);
-      const HEADERS = ["date","value","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_mean_mape_c","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","low","high"];
+      let HEADERS = [];
+
       function setStatus(msg){{ el('status').textContent = msg; }}
+      function setErr(msg){{ el('err').textContent = msg || ""; }}
 
       async function ids() {{
         const r = await fetch('/arima/ids');
@@ -109,7 +97,8 @@ def arima_form():
         return r.json();
       }}
 
-      function renderHead(){{
+      function renderHead(cols){{
+        HEADERS = cols;
         el('thead').innerHTML = HEADERS.map(h => `<th>${{h}}</th>`).join('');
       }}
       function renderRows(rows){{
@@ -134,22 +123,24 @@ def arima_form():
 
       async function doLoad(){{
         try{{
-          setStatus('Loading…');
+          setErr(""); setStatus('Loading…');
           const payload = buildPayload();
           const r = await fetch('/arima/query', {{ method:'POST', headers:{{'content-type':'application/json'}}, body: JSON.stringify(payload) }});
-          if(!r.ok) throw new Error('query ' + r.status);
           const data = await r.json();
+          if(!r.ok) throw new Error(data.detail || JSON.stringify(data));
+          if((data.rows||[]).length) renderHead(Object.keys(data.rows[0]));
+          else renderHead([]);
           renderRows(data.rows || []);
           setStatus((data.total||0) + ' rows');
           updateExportHref();
         }}catch(err){{
           console.error(err);
-          setStatus('Error: ' + err.message);
+          setErr('Error: ' + err.message);
+          setStatus('');
         }}
       }}
 
       async function bootstrap(){{
-        renderHead();
         const list = await ids();
         el('fid').innerHTML = `<option value="" selected disabled>Select forecast…</option>` + list.map(x => `<option value="${{x.id}}">${{x.name}}</option>`).join('');
       }}
@@ -171,63 +162,57 @@ def arima_form():
 
 @router.get("/ids")
 def ids(limit: int = 200):
-    try:
-        with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
-                SELECT fr.forecast_id AS id,
-                       COALESCE(fr.forecast_name, fr.forecast_id::text) AS name
-                FROM engine.forecast_registry fr
-                ORDER BY fr.forecast_id
-                LIMIT %s
-            """, (limit,))
-            rows = cur.fetchall()
-        return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
-    except Exception as e:
-        return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "ids"}
-
-class QueryBody(BaseModel):
-    forecast_id: str
-    date_from: Optional[str] = None
-    date_to: Optional[str] = None
-    page: int = 1
-    page_size: int = 2000
+    # Pull ids from registry (you can swap source later if needed)
+    with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("""
+            SELECT fr.forecast_id AS id,
+                   COALESCE(fr.forecast_name, fr.forecast_id::text) AS name
+            FROM engine.forecast_registry fr
+            ORDER BY fr.forecast_id
+            LIMIT %s
+        """, (limit,))
+        rows = cur.fetchall()
+    return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
 
 @router.post("/query")
-def query(body: QueryBody):
-    if not body.forecast_id:
-        raise HTTPException(400, "forecast_id required")
+def query(body: dict):
+    try:
+        forecast_id = body.get("forecast_id")
+        if not forecast_id:
+            raise HTTPException(400, "forecast_id required")
 
-    limit = max(1, min(10000, int(body.page_size or 2000)))
-    offset = max(0, (max(1, int(body.page or 1))-1) * limit)
+        date_from = body.get("date_from")
+        date_to = body.get("date_to")
+        limit = max(1, min(10000, int(body.get("page_size") or 2000)))
+        offset = max(0, (max(1, int(body.get("page") or 1)) - 1) * limit)
 
-    cols = "date, value, model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high"
-    conds = ["fr.forecast_id = %s"]
-    params = [body.forecast_id]
-    if body.date_from:
-        conds.append("v.date >= %s")
-        params.append(body.date_from)
-    if body.date_to:
-        conds.append("v.date <= %s")
-        params.append(body.date_to)
+        conds = ["fr.forecast_id = %s"]
+        params = [forecast_id]
+        if date_from:
+            conds.append("v.date >= %s"); params.append(date_from)
+        if date_to:
+            conds.append("v.date <= %s"); params.append(date_to)
 
-    where_clause = " AND ".join(conds)
-    sql = f"SELECT {cols} FROM {VIEW_NAME} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s"
-    cnt = f"SELECT COUNT(*) AS n FROM {VIEW_NAME} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}"
+        base = f"FROM {VIEW_NAME} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
+        sql = "SELECT v.* " + base + " ORDER BY v.date ASC LIMIT %s OFFSET %s"
+        cnt = "SELECT COUNT(*) AS n " + base
 
-    with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(cnt, params)
-        total = int(cur.fetchone()["n"])
-        cur.execute(sql, params + [limit, offset])
-        rows = cur.fetchall()
-
-    return { "rows": rows, "total": total }
+        with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(cnt, params)
+            total = int(cur.fetchone()["n"])
+            cur.execute(sql, params + [limit, offset])
+            rows = cur.fetchall()
+        return {"rows": rows, "total": total}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"detail": f"query failed: {e}", "trace": traceback.format_exc()})
 
 @router.get("/export")
 def export_csv(forecast_id: str = FQuery(...), date_from: Optional[str] = None, date_to: Optional[str] = None):
     if not forecast_id:
         raise HTTPException(400, "forecast_id required")
 
-    cols = ["date","value","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
     conds = ["fr.forecast_id = %s"]
     params = [forecast_id]
     if date_from:
@@ -236,25 +221,24 @@ def export_csv(forecast_id: str = FQuery(...), date_from: Optional[str] = None, 
         conds.append("v.date <= %s"); params.append(date_to)
 
     base = f"FROM {VIEW_NAME} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
-    sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
+    sql = "SELECT v.* " + base + " ORDER BY v.date ASC"
 
     def row_iter():
-        yield (",".join(cols) + "\n").encode("utf-8")
+        cols = []
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
+            cols = [d.name for d in cur.description]
+            yield (",".join(cols) + "\n").encode("utf-8")
             for rec in cur:
-                line = []
+                out = []
                 for v in rec:
-                    if v is None:
-                        line.append("")
-                    elif isinstance(v, dt.date):
-                        line.append(v.isoformat())
+                    if v is None: out.append("")
+                    elif isinstance(v, dt.date): out.append(v.isoformat())
                     else:
-                        s = str(v)
-                        if any(ch in s for ch in [',','\n','"']):
-                            s = '"' + s.replace('"','""') + '"'
-                        line.append(s)
-                yield (",".join(line) + "\n").encode("utf-8")
+                        s = str(v); 
+                        if any(ch in s for ch in [',','\n','"']): s = '"' + s.replace('"','""') + '"'
+                        out.append(s)
+                yield (",".join(out) + "\n").encode("utf-8")
 
     filename = f"tsf_export_arima_{forecast_id}.csv"
     return StreamingResponse(row_iter(), media_type="text/csv",
