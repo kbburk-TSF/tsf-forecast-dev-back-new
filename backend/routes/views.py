@@ -1,4 +1,3 @@
-
 # backend/routes/views.py
 # Version: 2025-09-24 v4.1 (V11_14 views, fixed indentation)
 # Notes:
@@ -75,7 +74,7 @@ def views_form():
 <html>
   <head>
     <meta charset="utf-8">
-    <title>TSF — View (tsf_vw_full)</title>
+    <title>TSF â€” View (tsf_vw_full)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
       body { margin:24px; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#111; }
@@ -127,7 +126,7 @@ def views_form():
       // Preserve backend contracts; single-scope constant
       const SCOPE = () => 'global';
       const el = (id) => document.getElementById(id);
-      const HEADERS = ["date","value","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_mean_mape_c","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","low","high"];
+      const HEADERS = ["date","value","arima_m","hwes_m","ses_m","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_mean_mape_c","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","low","high"];
 
       function setStatus(msg){ el('status').textContent = msg; }
 
@@ -174,7 +173,7 @@ def views_form():
 
       async function doLoad(){
         try{
-          setStatus('Loading…');
+          setStatus('Loadingâ€¦');
           const payload = buildPayload();
           const r = await fetch('/views/query', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
           if(!r.ok) throw new Error('query ' + r.status);
@@ -191,7 +190,7 @@ def views_form():
       async function bootstrap(){
         renderHead();
         const list = await ids(SCOPE(), '', '');
-        el('fid').innerHTML = `<option value="" selected disabled>Select forecast…</option>` + list.map(x => `<option value="${x.id}">${x.name}</option>`).join('');
+        el('fid').innerHTML = `<option value="" selected disabled>Select forecastâ€¦</option>` + list.map(x => `<option value="\${x.id}">\${x.name}</option>`).join('');
       }
 
       document.addEventListener('DOMContentLoaded', () => {
@@ -269,7 +268,8 @@ def run_query(body: ViewsQueryBody):
             conds.append("v.date <= %s")
             params.append(body.date_to)
 
-        cols = "date, value, model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high"
+        # ADDED: arima_m, hwes_m, ses_m directly after value
+        cols = "date, value, arima_m, hwes_m, ses_m, model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high"
         where_clause = " AND ".join(conds)
         sql = f"SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s"
         cnt = f"SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}"
@@ -299,7 +299,8 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
             conds.append("v.date <= %s")
             params.append(date_to)
 
-        cols = ["date","value","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
+        # ADDED: arima_m, hwes_m, ses_m in CSV header
+        cols = ["date","value","arima_m","hwes_m","ses_m","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
         base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
         sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
 
