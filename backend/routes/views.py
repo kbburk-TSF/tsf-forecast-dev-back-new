@@ -48,7 +48,6 @@ def _exists(views, name: str) -> bool:
     return any(v["schemaname"] == "engine" and v["viewname"] == name for v in views)
 
 def _extract_models(views) -> List[str]:
-    # Kept for UI parity; may be empty for your current setup.
     models = set()
     for v in views:
         name = v["viewname"]
@@ -62,19 +61,18 @@ def _extract_models(views) -> List[str]:
     return sorted(models)
 
 def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
-    # Everything routes to the global pre-baked full view
     if not _exists(views, "tsf_vw_full"):
         raise HTTPException(404, "V11_14 view engine.tsf_vw_full not found")
     return "engine.tsf_vw_full"
 
 @router.get("/", response_class=HTMLResponse)
 def views_form():
-    html = """
+    html = r"""
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
-    <title>TSF â€” View (tsf_vw_full)</title>
+    <title>TSF — View (tsf_vw_full)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
       body { margin:24px; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#111; }
@@ -123,7 +121,6 @@ def views_form():
     </div>
 
     <script>
-      // Preserve backend contracts; single-scope constant
       const SCOPE = () => 'global';
       const el = (id) => document.getElementById(id);
       const HEADERS = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_mean_mape_c","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","low","high"];
@@ -173,7 +170,7 @@ def views_form():
 
       async function doLoad(){
         try{
-          setStatus('Loadingâ€¦');
+          setStatus('Loading…');
           const payload = buildPayload();
           const r = await fetch('/views/query', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
           if(!r.ok) throw new Error('query ' + r.status);
@@ -190,7 +187,7 @@ def views_form():
       async function bootstrap(){
         renderHead();
         const list = await ids(SCOPE(), '', '');
-        el('fid').innerHTML = `<option value="" selected disabled>Select forecastâ€¦</option>` + list.map(x => `<option value="\${x.id}">\${x.name}</option>`).join('');
+        el('fid').innerHTML = `<option value="" selected disabled>Select forecast…</option>` + list.map(x => `<option value="${x.id}">${x.name}</option>`).join('');
       }
 
       document.addEventListener('DOMContentLoaded', () => {
@@ -258,7 +255,6 @@ def run_query(body: ViewsQueryBody):
         views = _discover_views(conn)
         vname = _resolve_view(body.scope, body.model, body.series, views)
 
-        # Build dynamic conditions and parameters
         conds = ["fr.forecast_id = %s"]
         params = [body.forecast_id]
         if body.date_from:
@@ -268,7 +264,6 @@ def run_query(body: ViewsQueryBody):
             conds.append("v.date <= %s")
             params.append(body.date_to)
 
-        # ADDED: ARIMA_M, HWES_M, SES_M directly after value
         cols = "date, value, ARIMA_M, HWES_M, SES_M, model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high"
         where_clause = " AND ".join(conds)
         sql = f"SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s"
@@ -285,7 +280,6 @@ def run_query(body: ViewsQueryBody):
 @router.get("/export")
 def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = None,
                forecast_id: str = FQuery(...), date_from: Optional[str] = None, date_to: Optional[str] = None):
-    # Stream full CSV (no pagination)
     with _connect() as conn:
         views = _discover_views(conn)
         vname = _resolve_view(scope, model, series, views)
@@ -299,17 +293,15 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
             conds.append("v.date <= %s")
             params.append(date_to)
 
-        # ADDED: ARIMA_M, HWES_M, SES_M in CSV header
         cols = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
         base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
         sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
 
         def row_iter():
-            yield (",".join(cols) + "\n").encode("utf-8")
+            yield (",".join(cols) + "\\n").encode("utf-8")
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 for rec in cur:
-                    # rec is a tuple in declared column order
                     line = []
                     for v in rec:
                         if v is None:
@@ -318,10 +310,10 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
                             line.append(v.isoformat())
                         else:
                             s = str(v)
-                            if any(ch in s for ch in [',','\n','"']):
-                                s = '"' + s.replace('"','""') + '"'
+                            if any(ch in s for ch in [',','\\n','\"']):
+                                s = '\"' + s.replace('\"','\"\"') + '\"'
                             line.append(s)
-                    yield (",".join(line) + "\n").encode("utf-8")
+                    yield (",".join(line) + "\\n").encode("utf-8")
 
         fname_bits = [scope or 'view']
         if model: fname_bits.append(model)
