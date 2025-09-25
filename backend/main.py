@@ -126,3 +126,17 @@ try:
     app.include_router(_arima.router)
 except Exception as _e:
     log.error(f"Failed to include arima routes explicitly: {_e}")
+
+# --- explicit include for hwes view (safe even with auto-loader) ---
+try:
+    from backend.routes import hwes as _hwes
+    app.include_router(_hwes.router)
+except Exception as _e:
+    log.error(f"Failed to include hwes routes explicitly: {_e}")
+
+# --- explicit include for ses view (safe even with auto-loader) ---
+try:
+    from backend.routes import ses as _ses
+    app.include_router(_ses.router)
+except Exception as _e:
+    log.error(f"Failed to include ses routes explicitly: {_e}")
