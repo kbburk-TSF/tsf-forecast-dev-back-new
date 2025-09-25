@@ -156,7 +156,7 @@ def views_form():
           scope: SCOPE(),
           model: '',
           series: '',
-          forecast_id: fid ? Number(fid) : null,
+          forecast_id: fid || null,
           date_from: from || null,
           date_to: to || null,
           page: 1,
