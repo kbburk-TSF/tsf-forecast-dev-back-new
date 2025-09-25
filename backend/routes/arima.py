@@ -1,5 +1,5 @@
 # backend/routes/arima.py
-# View Form & API for engine.tsf_vw_daily_best_arima_a0
+# View Form & API for engine.tsf_arima_m_a0
 # v1.1 — safer column selection (v.*), better error reporting
 
 from typing import Optional
@@ -9,7 +9,7 @@ import os, datetime as dt, traceback
 import psycopg
 from psycopg.rows import dict_row
 
-VIEW_NAME = "engine.tsf_vw_daily_best_arima_a0"
+VIEW_NAME = "engine.tsf_arima_m_a0"
 
 router = APIRouter(prefix="/arima", tags=["arima-view"])
 
