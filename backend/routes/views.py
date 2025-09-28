@@ -198,7 +198,7 @@ def ids(scope: str = FQuery(...), model: Optional[str] = None, series: Optional[
                 SELECT fr.forecast_id AS id,
                        COALESCE(fr.forecast_name, fr.forecast_id::text) AS name
                 FROM engine.forecast_registry fr
-                ORDER BY LOWER(fr.forecast_name) ASCLIMIT %s
+                ORDER BY LOWER(fr.forecast_name) ASC LIMIT %s
             """, (limit,))
             rows = cur.fetchall()
         return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
